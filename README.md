@@ -1,7 +1,8 @@
 # markdown-to-pdf
 
-Convert a Markdown file to a styled PDF. A small Python tool (built on
-[ReportLab](https://pypi.org/project/reportlab/)) with a thin shell entry point.
+An opinionated utility script to convert a Markdown file to a styled PDF.
+
+This is a small Python tool (built on [ReportLab](https://pypi.org/project/reportlab/)) with a thin shell entry point.
 
 ## Usage
 
