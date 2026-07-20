@@ -30,3 +30,7 @@ Run the tests (`unittest`):
 ```sh
 python3 test_inline_markup.py
 ```
+
+## License
+
+[MIT](LICENSE)
