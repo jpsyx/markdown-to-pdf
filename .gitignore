@@ -1,0 +1,10 @@
+# Python bytecode caches.
+__pycache__/
+*.pyc
+
+# Local virtualenvs.
+.venv/
+venv/
+
+# macOS.
+.DS_Store
