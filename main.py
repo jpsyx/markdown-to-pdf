@@ -9,7 +9,7 @@ The visual system:
 - Helvetica / Helvetica-Bold / Helvetica-Oblique
 - Chapter title: #1F4E79, 22 pt, bold
 - Section headings: #2E75B6, 14 pt, bold
-- Body text: #1F2937, 10.5 pt, 15 pt leading
+- Body text: #000000, 10.5 pt, 15 pt leading
 - Left/right margins: 62.2 pt
 - Top margin: 56.3 pt
 - No page numbers, headers, or footers
@@ -278,7 +278,7 @@ def _wrap_emojis(text: str) -> str:
 
 CHAPTER_BLUE = colors.HexColor("#1F4E79")
 SECTION_BLUE = colors.HexColor("#2E75B6")
-BODY_COLOR = colors.HexColor("#1F2937")
+BODY_COLOR = colors.HexColor("#000000")
 BLACK = colors.HexColor("#000000")
 CALLOUT_FILL = colors.HexColor("#EAF4FB")
 CALLOUT_BORDER = SECTION_BLUE
