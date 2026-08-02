@@ -30,6 +30,14 @@ built on [ReportLab](https://pypi.org/project/reportlab/). See
 3. **Do not track `__pycache__/` or `*.pyc`** (they are gitignored) — they are
    regenerated per machine.
 4. **Keep runtime deps in `requirements.txt`.** Today: `reportlab`.
+5. **Bump the version on every commit pushed to `main`.** `__version__` in
+   `main.py` is the single source of truth (surfaced via `--version` / `-v`).
+   Before you commit and push to `main`, raise it following semver: **patch**
+   (`0.1.0` → `0.1.1`) for fixes and internal changes, **minor**
+   (`0.1.0` → `0.2.0`) for a new user-facing feature, **major**
+   (`0.1.0` → `1.0.0`) for a breaking CLI change. One bump per pushed commit;
+   include it in that same commit. This applies only when you are authorized to
+   push (rule 1 still governs whether you push at all).
 
 ## Development
 

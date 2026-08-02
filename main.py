@@ -28,6 +28,11 @@ a version.
 
 from __future__ import annotations
 
+# Tool version (semver). Single source of truth. Bump on every commit that is
+# pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
+# breaking CLI changes. Surfaced via `--version` / `-v`.
+__version__ = "0.1.0"
+
 import argparse
 import os
 import re
@@ -1223,6 +1228,13 @@ def convert_markdown_to_pdf(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert a markdown file to a styled PDF.")
+    parser.add_argument(
+        "--version",
+        "-v",
+        action="version",
+        version=f"markdown-to-pdf {__version__}",
+        help="Print the tool version and exit.",
+    )
     parser.add_argument("markdown", type=Path, help="Markdown file path, e.g. chapter.md")
     parser.add_argument("--out", type=Path, default=None, help="Optional PDF output path, e.g. chapter.pdf")
     parser.add_argument(

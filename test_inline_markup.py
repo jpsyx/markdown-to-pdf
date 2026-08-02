@@ -3,9 +3,39 @@
 
 Run:  python3 test_inline_markup.py
 """
+import subprocess
+import sys
 import unittest
 
 import main
+
+
+class Version(unittest.TestCase):
+    def test_version_is_semver(self):
+        # __version__ is the single source of truth for the tool's version.
+        self.assertTrue(hasattr(main, "__version__"))
+        self.assertRegex(main.__version__, r"^\d+\.\d+\.\d+$")
+
+    def test_cli_version_flag(self):
+        # --version prints "markdown-to-pdf <version>" and exits 0.
+        out = subprocess.run(
+            [sys.executable, main.__file__, "--version"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(out.returncode, 0)
+        self.assertIn(main.__version__, out.stdout)
+        self.assertIn("markdown-to-pdf", out.stdout)
+
+    def test_cli_version_short_alias(self):
+        # -v is an alias for --version.
+        out = subprocess.run(
+            [sys.executable, main.__file__, "-v"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(out.returncode, 0)
+        self.assertIn(main.__version__, out.stdout)
 
 
 class UnderscoreEmphasis(unittest.TestCase):
