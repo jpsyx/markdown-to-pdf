@@ -285,6 +285,13 @@ CALLOUT_BORDER = SECTION_BLUE
 CODE_FILL = colors.HexColor("#F3F4F6")
 TABLE_HEADER_FILL = colors.HexColor("#F3F4F6")
 TABLE_BORDER = colors.HexColor("#D1D5DB")
+LINK_COLOR = colors.HexColor("#1155CC")
+
+# Base directory used to resolve *relative file* links to absolute file:// URIs
+# so they open on click. Set by convert_markdown_to_pdf() to the input .md's
+# parent. inline_markup() reads it only as a fallback when no explicit base_dir
+# is passed, so the string helper stays deterministic/testable.
+_LINK_BASE_DIR: str | None = None
 
 PAGE_WIDTH, PAGE_HEIGHT = letter
 LEFT_MARGIN = 56.2  # ReportLab frame padding adds 6 pt, yielding sample x=62.2
@@ -377,10 +384,8 @@ def _extract_code_spans(text: str) -> tuple[str, list[str]]:
     return "".join(out), spans
 
 
-def inline_markup(text: str) -> str:
-    text = normalize_text(text)
-    text, code_spans = _extract_code_spans(text)
-    text = escape(text)
+def _emphasis(text: str) -> str:
+    """Apply bold/italic (`**`,`*`,`__`,`_`) markdown emphasis to escaped text."""
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\1</i>", text)
     # Underscore emphasis. Guarded by word boundaries so intraword underscores
@@ -388,6 +393,56 @@ def inline_markup(text: str) -> str:
     # before italic (_) so a __run__ isn't half-consumed by the single-_ pass.
     text = re.sub(r"(?<![\w_])__(\S(?:.*?\S)?)__(?![\w_])", r"<b>\1</b>", text)
     text = re.sub(r"(?<![\w_])_(\S(?:.*?\S)?)_(?![\w_])", r"<i>\1</i>", text)
+    return text
+
+
+# Markdown inline link: [text](target). Not preceded by ! (that's an image).
+# Target is any run without whitespace or a closing paren.
+_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)")
+_EXTERNAL_HREF_RE = re.compile(r"^(?:https?|mailto|tel|ftp|file):", re.IGNORECASE)
+
+
+def _extract_links(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Replace `[text](target)` with sentinels, returning (text, [(text, target)])."""
+    links: list[tuple[str, str]] = []
+
+    def repl(match: re.Match) -> str:
+        links.append((match.group(1), match.group(2)))
+        return f"\x02LINK{len(links) - 1}\x02"
+
+    return _LINK_RE.sub(repl, text), links
+
+
+def _resolve_href(href: str, base_dir: str | None) -> str:
+    """Resolve a link target for the PDF.
+
+    External schemes (http/https/mailto/tel/ftp/file) and in-doc anchors (`#…`)
+    pass through unchanged — a URL annotation opens them in the default browser.
+    A *relative file path* is resolved against `base_dir` and returned as an
+    absolute `file://` URI so clicking it opens the file with the OS default
+    handler (macOS: same as `open`). Without a base dir the path is left as-is.
+    """
+    h = href.strip()
+    if not h or h.startswith("#") or _EXTERNAL_HREF_RE.match(h):
+        return h
+    if base_dir:
+        try:
+            return (Path(base_dir) / h).resolve().as_uri()
+        except (ValueError, OSError):
+            return h
+    return h
+
+
+def inline_markup(text: str, base_dir: str | None = None) -> str:
+    if base_dir is None:
+        base_dir = _LINK_BASE_DIR
+    text = normalize_text(text)
+    text, code_spans = _extract_code_spans(text)
+    # Pull links out before escaping so hrefs stay raw and their text/targets
+    # are not mangled by emphasis passes; they are rebuilt as <a> tags last.
+    text, links = _extract_links(text)
+    text = escape(text)
+    text = _emphasis(text)
 
     def _restore(match: re.Match) -> str:
         idx = int(match.group(1))
@@ -395,6 +450,21 @@ def inline_markup(text: str) -> str:
         return f'<font name="Courier" backColor="{CODE_FILL.hexval()}">{body}</font>'
 
     text = re.sub(r"\x01CODE(\d+)\x01", _restore, text)
+
+    if links:
+
+        def _restore_link(match: re.Match) -> str:
+            label, target = links[int(match.group(1))]
+            inner = _emphasis(escape(label))
+            href = _resolve_href(target, base_dir)
+            href_attr = escape(href, {'"': "&quot;"})
+            return (
+                f'<a href="{href_attr}" color="{LINK_COLOR.hexval()}">'
+                f"<u>{inner}</u></a>"
+            )
+
+        text = re.sub(r"\x02LINK(\d+)\x02", _restore_link, text)
+
     text = _wrap_emojis(text)
     return text
 
@@ -1119,6 +1189,10 @@ def convert_markdown_to_pdf(
         )
     if not markdown_path.exists():
         raise FileNotFoundError(f"Markdown file not found: {markdown_path}")
+    # Relative file links in the markdown resolve against the .md's own folder,
+    # so they become absolute file:// URIs that open on click.
+    global _LINK_BASE_DIR
+    _LINK_BASE_DIR = str(markdown_path.resolve().parent)
     if output_path is None:
         output_path = markdown_path.with_suffix(".pdf")
     if output_path.exists() and not _prompt_overwrite(output_path):
