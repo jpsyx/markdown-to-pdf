@@ -4,21 +4,69 @@ An opinionated utility script to convert a Markdown file to a styled PDF.
 
 This is a small Python tool (built on [ReportLab](https://pypi.org/project/reportlab/)) with a thin shell entry point.
 
-## Usage
+## Install
 
 ```sh
-./run.sh <file.md>                 # write <file>.pdf next to the input
-./run.sh <file.md> --out out.pdf   # explicit output path
+git clone https://github.com/jpsyx/markdown-to-pdf.git
+cd markdown-to-pdf
+./install.sh          # → ~/.local/bin/markdown-to-pdf
+```
+
+`install.sh` creates a private virtualenv inside the clone, installs the
+dependencies into it, and writes an executable launcher into `~/.local/bin` —
+so `markdown-to-pdf` is a real command available to any shell, script, or tool:
+
+```sh
+markdown-to-pdf <file.md>                 # write <file>.pdf next to the input
+markdown-to-pdf <file.md> --out out.pdf   # explicit output path
+markdown-to-pdf --help                    # all options
+```
+
+Set `BIN_DIR` to install somewhere else (`BIN_DIR=/usr/local/bin ./install.sh`).
+If the chosen directory isn't on your `$PATH`, the installer says so and prints
+the line to add.
+
+**Keep the clone.** The converter and its virtualenv live there; the launcher
+points at them. If you move the clone, re-run `./install.sh` from its new
+location.
+
+### Updating
+
+```sh
+git pull && ./install.sh
+```
+
+`install.sh` is idempotent: it refreshes the virtualenv and overwrites the same
+launcher, never leaving a second copy. It also repairs a virtualenv whose Python
+has since been upgraded or removed.
+
+### Uninstalling
+
+```sh
+rm ~/.local/bin/markdown-to-pdf   # or $BIN_DIR/markdown-to-pdf
+rm -rf .venv                      # optional; everything else is in the clone
+```
+
+## Usage from a clone
+
+Without installing, run it in place:
+
+```sh
+./run.sh <file.md>
 ```
 
 ## Requirements
 
-- Python 3
-- `reportlab` (`pip install -r requirements.txt`)
+- Python 3, with the standard `venv` module (Debian/Ubuntu ship it separately as
+  `python3-venv`)
+- `reportlab` — `./install.sh` installs it into the virtualenv; by hand,
+  `pip install -r requirements.txt`
+- Network access the first time you install (to download `reportlab`)
 
 ## Layout
 
-- `run.sh` — entry point; resolves its own dir and execs `python3 main.py`.
+- `install.sh` — installs the launcher onto `$PATH` (and updates it in place).
+- `run.sh` — entry point; resolves its own dir and execs `main.py`.
 - `main.py` — the converter (argument parsing, Markdown → PDF rendering).
 - `test_inline_markup.py` — unit tests for inline-markup parsing.
 - `docs/architecture.md` — how the converter is structured.

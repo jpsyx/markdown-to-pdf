@@ -31,7 +31,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import argparse
 import os
@@ -1227,7 +1227,13 @@ def convert_markdown_to_pdf(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert a markdown file to a styled PDF.")
+    # `prog` is pinned to the command name so `--help` and the missing-argument
+    # usage error name the installed executable, not this file, however it was
+    # invoked (installed launcher, run.sh, or `python3 main.py`).
+    parser = argparse.ArgumentParser(
+        prog="markdown-to-pdf",
+        description="Convert a markdown file to a styled PDF.",
+    )
     parser.add_argument(
         "--version",
         "-v",

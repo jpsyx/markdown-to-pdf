@@ -10,16 +10,42 @@ A small, self-contained tool that converts a Markdown file to a styled PDF,
 built on [ReportLab](https://pypi.org/project/reportlab/). See
 [`docs/architecture.md`](docs/architecture.md).
 
-## Entry point
+## Entry points
 
-- **`run.sh` is the stable entry point.** It must run the tool and keep working
-  when called directly from any location — it resolves its own directory (via
-  `BASH_SOURCE`) rather than assuming a working directory or a fixed install
-  path. Keep its name and location (`run.sh` at the repo root) stable, and keep
-  its CLI (`<file.md>`, `--out <path>`).
-- **No machine-specific literals.** This repo may be checked out at a different
-  absolute path on every machine, so never hardcode a home path or a per-machine
-  location. Resolve paths relative to the script.
+There are two, both at the repo root, and both must keep working when called
+directly from any location: each resolves its own directory (via `BASH_SOURCE`)
+rather than assuming a working directory or a fixed install path.
+
+- **`install.sh` installs the tool onto `$PATH`.** It creates the private
+  virtualenv (`.venv/`, gitignored), installs `requirements.txt` into it, and
+  writes an executable launcher at `$BIN_DIR/markdown-to-pdf` (`BIN_DIR`
+  defaults to `~/.local/bin`). It must stay **idempotent and double as the
+  updater**: rebuild in place, overwrite the launcher at a fixed filename, never
+  leave a second copy. It must also be **self-healing** — a virtualenv whose
+  interpreter no longer runs (Python upgraded, switched, or removed) is
+  recreated rather than reported as an error. This is what makes
+  `markdown-to-pdf` a real command reachable by any shell, script, or tool.
+- **`install.sh` must work for anyone who clones this repo**, on a machine that
+  knows nothing about it: no assumed `$PATH` entry, no assumed environment, no
+  private convention. `BIN_DIR` is an ordinary override with a sane default, not
+  a required input. When a prerequisite is missing or the result won't be
+  usable, **say so and print the fix** — an absent `python3 -m venv`, a
+  `BIN_DIR` that isn't on `$PATH`, a clone that was moved out from under an
+  installed launcher. Never let a stranger's install fail silently or leave a
+  command they can't invoke.
+- **`run.sh` runs the tool from a clone.** It picks `.venv/bin/python` when
+  present and the system `python3` otherwise, then execs `main.py`. Keep its
+  name and location (`run.sh` at the repo root) stable, and keep its CLI
+  (`<file.md>`, `--out <path>`). The installed launcher execs it, so the CLI is
+  defined in exactly one place and a `git pull` is live without a reinstall.
+- **`main.py` owns the CLI surface.** Argument parsing, `--help`, and the
+  missing-argument usage error all live there (argparse). Never duplicate a
+  usage string in a shell wrapper — it goes stale.
+- **No machine-specific literals in tracked files.** This repo may be checked
+  out at a different absolute path on every machine, so never hardcode a home
+  path or a per-machine location. Resolve paths relative to the script.
+  (`install.sh` writing the resolved clone path into the launcher it *generates*
+  is fine; that file is not tracked.)
 
 ## Hard rules
 
@@ -27,9 +53,11 @@ built on [ReportLab](https://pypi.org/project/reportlab/). See
    plain words in the current conversation. Leave the tree dirty for review.
 2. **This repo may be public.** Never commit secrets, tokens, or
    machine-specific paths.
-3. **Do not track `__pycache__/` or `*.pyc`** (they are gitignored) — they are
-   regenerated per machine.
-4. **Keep runtime deps in `requirements.txt`.** Today: `reportlab`.
+3. **Do not track `__pycache__/`, `*.pyc`, or `.venv/`** (all gitignored) — they
+   are regenerated per machine.
+4. **Keep runtime deps in `requirements.txt`.** Today: `reportlab`. That file is
+   what `install.sh` installs into the virtualenv, so a new dep is added there
+   and nowhere else.
 5. **Bump the version on every commit pushed to `main`.** `__version__` in
    `main.py` is the single source of truth (surfaced via `--version` / `-v`).
    Before you commit and push to `main`, raise it following semver: **patch**
