@@ -19,8 +19,13 @@ so `markdown-to-pdf` is a real command available to any shell, script, or tool:
 ```sh
 markdown-to-pdf <file.md>                 # write <file>.pdf next to the input
 markdown-to-pdf <file.md> --out out.pdf   # explicit output path
+markdown-to-pdf <file.md> --black-text    # pure-black printable text
 markdown-to-pdf --help                    # all options
 ```
+
+Markdown links remain clickable in the PDF and are rendered without underlines
+for print readability. Use `--black-text` when the entire document, including
+headings and links, should be pure black (`#000000`).
 
 Set `BIN_DIR` to install somewhere else (`BIN_DIR=/usr/local/bin ./install.sh`).
 If the chosen directory isn't on your `$PATH`, the installer says so and prints

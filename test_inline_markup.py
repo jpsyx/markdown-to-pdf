@@ -112,7 +112,7 @@ class Links(unittest.TestCase):
         out = main.inline_markup("[Devex](https://www.devex.com)")
         self.assertIn('href="https://www.devex.com"', out)
         self.assertIn("<a ", out)
-        self.assertIn(">Devex</u></a>", out)
+        self.assertIn('underline="0">Devex</a>', out)
 
     def test_mailto_kept(self):
         out = main.inline_markup("[mail me](mailto:a@b.com)")
@@ -159,6 +159,27 @@ class Links(unittest.TestCase):
         out = main.inline_markup("[a](song_list.md)", base_dir="/d")
         self.assertNotIn("<i>", out)
         self.assertIn("song_list.md", out)
+
+    def test_black_text_mode_makes_links_black(self):
+        main._BLACK_TEXT = True
+        try:
+            out = main.inline_markup("[article](https://example.com/article)")
+        finally:
+            main._BLACK_TEXT = False
+        self.assertIn('color="0x000000"', out)
+
+    def test_links_are_clickable_without_underlines(self):
+        out = main.inline_markup("[article](https://example.com/article)")
+        self.assertIn('href="https://example.com/article"', out)
+        self.assertIn('underline="0"', out)
+        self.assertNotIn("<u>", out)
+
+
+class Styles(unittest.TestCase):
+    def test_black_text_mode_makes_every_style_black(self):
+        styles = main.make_styles(black_text=True)
+        for style in styles.values():
+            self.assertEqual(style.textColor, main.BLACK)
 
 
 if __name__ == "__main__":

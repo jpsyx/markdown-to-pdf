@@ -20,6 +20,7 @@ The visual system:
 Usage:
     python main.py chapter.md
     python main.py chapter.md --out chapter.pdf
+    python main.py chapter.md --black-text
 
 If the output path already exists, the script prompts to overwrite or to
 append a version (-v2, -v3, ...). Non-interactive runs default to appending
@@ -31,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 import argparse
 import os
@@ -291,6 +292,7 @@ CODE_FILL = colors.HexColor("#F3F4F6")
 TABLE_HEADER_FILL = colors.HexColor("#F3F4F6")
 TABLE_BORDER = colors.HexColor("#D1D5DB")
 LINK_COLOR = colors.HexColor("#1155CC")
+_BLACK_TEXT = False
 
 # Base directory used to resolve *relative file* links to absolute file:// URIs
 # so they open on click. Set by convert_markdown_to_pdf() to the input .md's
@@ -463,9 +465,10 @@ def inline_markup(text: str, base_dir: str | None = None) -> str:
             inner = _emphasis(escape(label))
             href = _resolve_href(target, base_dir)
             href_attr = escape(href, {'"': "&quot;"})
+            link_color = BLACK if _BLACK_TEXT else LINK_COLOR
             return (
-                f'<a href="{href_attr}" color="{LINK_COLOR.hexval()}">'
-                f"<u>{inner}</u></a>"
+                f'<a href="{href_attr}" color="{link_color.hexval()}" '
+                f'underline="0">{inner}</a>'
             )
 
         text = re.sub(r"\x02LINK(\d+)\x02", _restore_link, text)
@@ -474,7 +477,7 @@ def inline_markup(text: str, base_dir: str | None = None) -> str:
     return text
 
 
-def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
+def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[str, ParagraphStyle]:
     """Build the paragraph style sheet.
 
     `font_shrink` (points) is subtracted from every style's fontSize and
@@ -483,6 +486,9 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
     every other markdown-to-pdf invocation.
     """
     s = float(font_shrink)
+    chapter_color = BLACK if black_text else CHAPTER_BLUE
+    section_color = BLACK if black_text else SECTION_BLUE
+    body_color = BLACK if black_text else BODY_COLOR
     base = getSampleStyleSheet()
     return {
         "title": ParagraphStyle(
@@ -491,7 +497,7 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
             fontName="Helvetica-Bold",
             fontSize=22 - s,
             leading=26.4 - s,
-            textColor=CHAPTER_BLUE,
+            textColor=chapter_color,
             alignment=TA_LEFT,
             leftIndent=0,
             firstLineIndent=0,
@@ -505,7 +511,7 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
             fontName="Helvetica-Bold",
             fontSize=14 - s,
             leading=17 - s,
-            textColor=SECTION_BLUE,
+            textColor=section_color,
             alignment=TA_LEFT,
             leftIndent=0,
             firstLineIndent=0,
@@ -519,7 +525,7 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
             fontName="Helvetica-Bold",
             fontSize=11.5 - s,
             leading=14.5 - s,
-            textColor=SECTION_BLUE,
+            textColor=section_color,
             alignment=TA_LEFT,
             leftIndent=0,
             firstLineIndent=0,
@@ -533,7 +539,7 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
             fontName="Helvetica-Bold",
             fontSize=10.5 - s,
             leading=13 - s,
-            textColor=CHAPTER_BLUE,
+            textColor=chapter_color,
             alignment=TA_LEFT,
             leftIndent=0,
             firstLineIndent=0,
@@ -547,7 +553,7 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
             fontName="Helvetica",
             fontSize=10.5 - s,
             leading=15 - s,
-            textColor=BODY_COLOR,
+            textColor=body_color,
             alignment=TA_LEFT,
             leftIndent=0,
             firstLineIndent=0,
@@ -560,7 +566,7 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
             fontName="Helvetica",
             fontSize=10.5 - s,
             leading=15 - s,
-            textColor=BODY_COLOR,
+            textColor=body_color,
             alignment=TA_LEFT,
             leftIndent=0,
             firstLineIndent=0,
@@ -573,7 +579,7 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
             fontName="Helvetica-Bold",
             fontSize=10.5 - s,
             leading=15 - s,
-            textColor=BODY_COLOR,
+            textColor=body_color,
             alignment=TA_LEFT,
             leftIndent=0,
             firstLineIndent=0,
@@ -586,7 +592,7 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
             fontName="Helvetica-Oblique",
             fontSize=10.5 - s,
             leading=15 - s,
-            textColor=CHAPTER_BLUE,
+            textColor=chapter_color,
             alignment=TA_LEFT,
             leftIndent=0,
             firstLineIndent=0,
@@ -599,7 +605,7 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
             fontName="Helvetica-Oblique",
             fontSize=10.5 - s,
             leading=15 - s,
-            textColor=CHAPTER_BLUE,
+            textColor=chapter_color,
             alignment=TA_LEFT,
             leftIndent=0,
             firstLineIndent=0,
@@ -612,7 +618,7 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
             fontName="Helvetica",
             fontSize=10.5 - s,
             leading=15 - s,
-            textColor=BODY_COLOR,
+            textColor=body_color,
             alignment=TA_LEFT,
             leftIndent=0,
             firstLineIndent=0,
@@ -630,7 +636,7 @@ def make_styles(font_shrink: float = 0.0) -> dict[str, ParagraphStyle]:
             fontName="Helvetica",
             fontSize=10.5 - s,
             leading=15 - s,
-            textColor=BODY_COLOR,
+            textColor=body_color,
             alignment=TA_LEFT,
             leftIndent=40,
             firstLineIndent=0,
@@ -679,7 +685,9 @@ def callout_box(lines: Iterable[str], style: ParagraphStyle) -> Table:
     return table
 
 
-def code_block(lines: list[str], language: str, style: ParagraphStyle) -> Table:
+def code_block(
+    lines: list[str], language: str, style: ParagraphStyle, *, black_text: bool = False
+) -> Table:
     # Preserve whitespace and line breaks exactly. With no language tag, use a
     # plain Preformatted (mono font, no colors). With a language tag, run the
     # source through Pygments to produce XPreformatted markup with per-token
@@ -687,7 +695,7 @@ def code_block(lines: list[str], language: str, style: ParagraphStyle) -> Table:
     text = "\n".join(lines)
     cell: Flowable
     used_highlight = False
-    if language and _PYGMENTS_AVAILABLE:
+    if language and _PYGMENTS_AVAILABLE and not black_text:
         try:
             highlighted = pygments2xpre(text, language=language)
             cell = XPreformatted(highlighted, style)
@@ -1006,8 +1014,11 @@ def parse_markdown(
     compact_tables: bool = False,
     font_shrink: float = 0.0,
     agenda_tables: bool = False,
+    black_text: bool = False,
 ) -> list[Flowable]:
-    styles = make_styles(font_shrink=font_shrink)
+    global _BLACK_TEXT
+    _BLACK_TEXT = black_text
+    styles = make_styles(font_shrink=font_shrink, black_text=black_text)
     story: list[Flowable] = []
     paragraph_buffer: list[str] = []
     bullet_buffer: list[tuple[str, str, str | None, int | None]] = []
@@ -1033,7 +1044,14 @@ def parse_markdown(
         # backticks/asterisks in code do not become formatting.
         if raw_line.lstrip().startswith("```"):
             if in_code_block:
-                story.append(code_block(code_buffer, code_language, styles["code"]))
+                story.append(
+                    code_block(
+                        code_buffer,
+                        code_language,
+                        styles["code"],
+                        black_text=black_text,
+                    )
+                )
                 code_buffer = []
                 code_language = ""
                 in_code_block = False
@@ -1187,6 +1205,7 @@ def convert_markdown_to_pdf(
     compact_tables: bool = False,
     font_shrink: float = 0.0,
     agenda_tables: bool = False,
+    black_text: bool = False,
 ) -> Path:
     if markdown_path.suffix.lower() != ".md":
         raise ValueError(
@@ -1210,6 +1229,7 @@ def convert_markdown_to_pdf(
         compact_tables=compact_tables,
         font_shrink=font_shrink,
         agenda_tables=agenda_tables,
+        black_text=black_text,
     )
 
     doc = SimpleDocTemplate(
@@ -1263,6 +1283,12 @@ def main() -> None:
         help="Subtract N points from every text style's fontSize and leading. Use sparingly (e.g. 1.0) as a last-resort fit; defaults preserve the standard look.",
     )
     parser.add_argument(
+        "--black-text",
+        dest="black_text",
+        action="store_true",
+        help="Render all PDF text, including headings and links, as pure black (#000000).",
+    )
+    parser.add_argument(
         "--agenda",
         dest="agenda",
         action="store_true",
@@ -1283,6 +1309,7 @@ def main() -> None:
             compact_tables=compact_tables,
             font_shrink=args.font_shrink,
             agenda_tables=agenda_tables,
+            black_text=args.black_text,
         )
     except (ValueError, FileNotFoundError) as err:
         print(_color(f"error: {err}", _Color.RED, _Color.BOLD, stream=sys.stderr), file=sys.stderr)
