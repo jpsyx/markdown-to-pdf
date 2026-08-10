@@ -32,14 +32,15 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 import argparse
+import html
 import os
 import re
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -755,18 +756,64 @@ def _is_table_separator(line: str) -> bool:
     stripped = line.strip()
     if not stripped.startswith("|"):
         return False
-    inner = stripped.strip("|").strip()
-    if not inner:
+    cells = _parse_table_row(stripped)
+    if not cells:
         return False
-    for cell in (c.strip() for c in inner.split("|")):
+    for cell in cells:
         if not cell or not _TABLE_SEPARATOR_CELL_RE.fullmatch(cell):
             return False
     return True
 
 
+def _split_table_cells(line: str) -> list[str]:
+    """Split a GFM table row on *unescaped* pipes, keeping the escapes.
+
+    A backslash escapes the next character, so `\\|` is a literal pipe inside a
+    cell and `\\\\` is a literal backslash whose trailing pipe still separates.
+    Splitting naively on `|` is what lets a title like `Opinion \\| Three
+    minutes on Sudan` shift every later cell one column to the right and invent
+    a phantom column at the end of the table.
+    """
+    cells: list[str] = []
+    current: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch == "\\" and i + 1 < n:
+            current.append(ch)
+            current.append(line[i + 1])
+            i += 2
+            continue
+        if ch == "|":
+            cells.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    cells.append("".join(current))
+    return cells
+
+
+def _unescape_table_cell(cell: str) -> str:
+    """Resolve the two escapes table splitting depends on: `\\|` and `\\\\`.
+
+    Every other backslash escape is left for the inline-markup pass, which
+    treats them literally — this only undoes what row splitting had to read.
+    """
+    return re.sub(r"\\([\\|])", r"\1", cell)
+
+
 def _parse_table_row(line: str) -> list[str]:
     """Split a GFM table row into cell strings. Outer pipes are stripped."""
-    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+    cells = _split_table_cells(line.strip())
+    # Drop the empty cells produced by the optional leading/trailing pipes.
+    if cells and not cells[0].strip():
+        cells = cells[1:]
+    if cells and not cells[-1].strip():
+        cells = cells[:-1]
+    return [_unescape_table_cell(cell.strip()) for cell in cells]
 
 
 def _parse_table_alignments(separator_line: str) -> list[str]:
@@ -785,6 +832,99 @@ def _parse_table_alignments(separator_line: str) -> list[str]:
     return alignments
 
 
+def fit_column_widths(
+    min_widths: Sequence[float],
+    max_widths: Sequence[float],
+    available: float,
+) -> list[float]:
+    """Distribute `available` points across columns from their content widths.
+
+    `max_widths[i]` is the width column *i* needs to render its widest cell on
+    one line; `min_widths[i]` is the width of its longest unbreakable word (the
+    narrowest it can get without clipping). Pure arithmetic, no ReportLab —
+    measuring lives in `measure_column_widths`.
+
+    Three cases:
+
+    - **Everything fits** — each column gets its natural width and the leftover
+      slack is shared out in proportion to those widths, so the table still
+      spans the text block instead of ending raggedly mid-page.
+    - **Too wide** — the shortfall is charged to each column in proportion to
+      how much slack it has (`max - min`), so a one-digit `#` column keeps its
+      width and a prose column absorbs the wrapping.
+    - **Even the minimums don't fit** — split in proportion to the minimums and
+      let the cells wrap; there is no width that avoids it.
+
+    The returned widths always sum to `available`.
+    """
+    n_cols = len(max_widths)
+    if n_cols == 0:
+        return []
+    even = [available / n_cols] * n_cols
+    mins = [max(0.0, min(float(lo), float(hi))) for lo, hi in zip(min_widths, max_widths)]
+    maxs = [max(0.0, float(hi)) for hi in max_widths]
+
+    total_max = sum(maxs)
+    if total_max <= 0:
+        return even
+
+    if total_max <= available:
+        slack = available - total_max
+        return [w + slack * (w / total_max) for w in maxs]
+
+    total_min = sum(mins)
+    if total_min >= available:
+        return even if total_min <= 0 else [available * (w / total_min) for w in mins]
+
+    flex = total_max - total_min
+    shortfall = total_max - available
+    return [hi - shortfall * ((hi - lo) / flex) for lo, hi in zip(mins, maxs)]
+
+
+def _text_width(text: str, style: ParagraphStyle) -> float:
+    """Width of `text` in `style`'s font, or a rough estimate if unmeasurable."""
+    if not text:
+        return 0.0
+    try:
+        return pdfmetrics.stringWidth(text, style.fontName, style.fontSize)
+    except (KeyError, ValueError, UnicodeEncodeError):
+        # A glyph the base-14 font can't encode (an emoji, say). Estimate
+        # rather than fail: column sizing is a layout hint, not a contract.
+        return len(text) * style.fontSize * 0.55
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _visible_cell_text(cell: str) -> str:
+    """The text a cell actually shows: markdown resolved, markup tags removed.
+
+    Runs the same `inline_markup` the cell will be rendered with, so a link
+    measures as its label (not its URL) and emphasis markers don't count.
+    """
+    return html.unescape(_TAG_RE.sub("", inline_markup(cell)))
+
+
+def measure_column_widths(
+    columns: Sequence[Sequence[tuple[str, ParagraphStyle]]],
+    padding: float,
+) -> tuple[list[float], list[float]]:
+    """Measure each column's (longest-word, widest-cell) width, incl. padding."""
+    min_widths: list[float] = []
+    max_widths: list[float] = []
+    for column in columns:
+        col_min = 0.0
+        col_max = 0.0
+        for cell, style in column:
+            text = _visible_cell_text(cell)
+            col_max = max(col_max, _text_width(text, style))
+            for word in text.split():
+                col_min = max(col_min, _text_width(word, style))
+        min_widths.append(col_min + padding)
+        max_widths.append(max(col_min, col_max) + padding)
+    return min_widths, max_widths
+
+
 def render_table(
     header: list[str],
     rows: list[list[str]],
@@ -795,7 +935,12 @@ def render_table(
     compact: bool = False,
     agenda_tables: bool = False,
 ) -> Table:
-    """Render a GFM table as a ReportLab Table with equal column widths.
+    """Render a GFM table as a ReportLab Table with content-fitted columns.
+
+    Column widths come from what the cells actually contain (see
+    `fit_column_widths`), so a `#` column of single digits stays narrow and the
+    space it used to waste goes to the prose columns. The table still spans the
+    full text block.
 
     If every header cell is empty (a common pattern when the user wants a
     pure-grid layout — GFM requires a header row but the user has nothing
@@ -823,7 +968,6 @@ def render_table(
 
     header_is_empty = all(not cell.strip() for cell in header)
     available = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
-    col_width = available / n_cols
 
     data: list[list[Flowable]] = []
     if not header_is_empty:
@@ -837,10 +981,19 @@ def render_table(
 
     top_pad, bot_pad = (1, 1) if compact else (6, 6)
     left_pad = 0 if agenda_tables else 8
+    right_pad = 8
+    columns = [
+        [(row[col], styles["table_cell"]) for row in rows]
+        + ([] if header_is_empty else [(header[col], styles["table_header"])])
+        for col in range(n_cols)
+    ]
+    col_widths = fit_column_widths(
+        *measure_column_widths(columns, left_pad + right_pad), available
+    )
     table_style: list = [
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), left_pad),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), right_pad),
         ("TOPPADDING", (0, 0), (-1, -1), top_pad),
         ("BOTTOMPADDING", (0, 0), (-1, -1), bot_pad),
     ]
@@ -852,7 +1005,7 @@ def render_table(
     for col_idx, align in enumerate(alignments):
         table_style.append(("ALIGN", (col_idx, 0), (col_idx, -1), align_map[align]))
 
-    table = Table(data, colWidths=[col_width] * n_cols)
+    table = Table(data, colWidths=col_widths)
     table.setStyle(TableStyle(table_style))
     table.hAlign = "LEFT"
     table.spaceBefore = 2 if compact else 6

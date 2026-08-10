@@ -34,6 +34,14 @@ absolute checkout path and can be run directly by anyone.
   heavy functions, so they are covered directly by `test_inline_markup.py`.
 - **Block builders** (`paragraph`, `callout_box`, `code_block`, `blockquote`,
   `render_table`, and the `flush_*` helpers): turn buffered lines into Flowables.
+- **Tables** (`_split_table_cells`, `_parse_table_row`, `measure_column_widths`,
+  `fit_column_widths`, `render_table`). Two pieces are worth knowing. Rows are
+  split on *unescaped* pipes, so `\|` is a literal pipe inside a cell rather
+  than a cell boundary that shifts every later cell right. Columns are then
+  sized to their content: each column is measured for its longest word and its
+  widest cell, and `fit_column_widths` — pure arithmetic, unit-tested — shares
+  the text block out between them, so an index or checkbox column stays narrow
+  and prose columns get the room. The table always spans the full text block.
 - **Parser** (`parse_markdown`): the line-oriented state machine that walks the
   Markdown and dispatches to the block builders, flushing buffers at boundaries.
 - **Output** (`versioned_path`, `_prompt_overwrite`, `convert_markdown_to_pdf`,
@@ -44,5 +52,6 @@ absolute checkout path and can be run directly by anyone.
 
 `test_inline_markup.py` (stdlib `unittest`) pins the inline-markup behavior —
 the emphasis rules, underscore-in-identifiers literals, and code-span
-extraction. New parsing behavior should be added test-first here (red/green).
-The rendering/IO layers are exercised by running the tool on real Markdown.
+extraction — plus table row splitting and column fitting. New parsing behavior
+should be added test-first here (red/green). The rendering/IO layers are
+exercised by running the tool on real Markdown.

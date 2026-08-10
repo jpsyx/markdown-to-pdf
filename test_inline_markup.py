@@ -175,6 +175,111 @@ class Links(unittest.TestCase):
         self.assertNotIn("<u>", out)
 
 
+class TableRowParsing(unittest.TestCase):
+    def test_plain_row_splits_on_pipes(self):
+        self.assertEqual(
+            main._parse_table_row("| 1 | Article | Publication |"),
+            ["1", "Article", "Publication"],
+        )
+
+    def test_escaped_pipe_stays_inside_its_cell(self):
+        # A title like "Opinion | Three minutes on Sudan" is escaped `\|` in
+        # GFM. It must NOT split the cell into two (which would shift every
+        # later cell right and invent a phantom column).
+        self.assertEqual(
+            main._parse_table_row(r"| 4 | Opinion \| Three minutes on Sudan | TNH |"),
+            ["4", "Opinion | Three minutes on Sudan", "TNH"],
+        )
+
+    def test_escaped_pipe_inside_a_link_label(self):
+        row = main._parse_table_row(
+            r"| 4 | [Opinion \| Three minutes](https://x.org/a) | TNH |"
+        )
+        self.assertEqual(
+            row, ["4", "[Opinion | Three minutes](https://x.org/a)", "TNH"]
+        )
+
+    def test_escaped_backslash_before_a_real_separator(self):
+        # `\\` is a literal backslash; the pipe after it still separates.
+        self.assertEqual(main._parse_table_row(r"| a\\ | b |"), ["a\\", "b"])
+
+    def test_separator_row_with_escaped_pipe_is_not_a_separator(self):
+        self.assertFalse(main._is_table_separator(r"| --- \| --- |"))
+
+    def test_alignments_unaffected_by_escaping(self):
+        self.assertEqual(
+            main._parse_table_alignments("| ---: | --- | :---: |"),
+            ["RIGHT", "LEFT", "CENTER"],
+        )
+
+
+class ColumnWidths(unittest.TestCase):
+    def test_narrow_column_stays_narrow(self):
+        # A `#` column of single digits must not eat a third of the table.
+        widths = main.fit_column_widths([10, 40, 30], [20, 300, 120], 500)
+        self.assertLess(widths[0], 40)
+        self.assertGreater(widths[1], widths[2])
+
+    def test_widths_always_fill_the_available_space(self):
+        for mins, maxs in (
+            ([10, 40, 30], [20, 300, 120]),
+            ([10, 40, 30], [20, 900, 400]),
+            ([200, 300, 250], [400, 600, 500]),
+            ([5], [9]),
+        ):
+            widths = main.fit_column_widths(mins, maxs, 500)
+            self.assertAlmostEqual(sum(widths), 500, places=6)
+
+    def test_content_that_fits_keeps_its_proportions(self):
+        widths = main.fit_column_widths([10, 40], [100, 300], 400)
+        self.assertAlmostEqual(widths[0], 100, places=6)
+        self.assertAlmostEqual(widths[1], 300, places=6)
+
+    def test_overflow_shrinks_toward_the_minimum_width(self):
+        widths = main.fit_column_widths([20, 100], [40, 800], 300)
+        # Every column keeps at least its longest-word width when there is room.
+        self.assertGreaterEqual(widths[0], 20)
+        self.assertGreaterEqual(widths[1], 100)
+        # The greedy column absorbs almost all of the shortfall.
+        self.assertLess(widths[0], 40)
+        self.assertGreater(widths[1], 200)
+
+    def test_impossible_minimums_split_proportionally(self):
+        widths = main.fit_column_widths([100, 300], [150, 400], 200)
+        self.assertAlmostEqual(sum(widths), 200, places=6)
+        self.assertGreater(widths[1], widths[0])
+
+    def test_no_columns_yields_no_widths(self):
+        self.assertEqual(main.fit_column_widths([], [], 500), [])
+
+    def test_zero_content_falls_back_to_equal_columns(self):
+        self.assertEqual(main.fit_column_widths([0, 0], [0, 0], 400), [200, 200])
+
+
+class TableRendering(unittest.TestCase):
+    def _widths(self, header, rows, alignments):
+        styles = main.make_styles()
+        table = main.render_table(header, rows, alignments, styles)
+        return table._argW
+
+    def test_index_column_is_sized_to_its_digits(self):
+        header = ["#", "Article", "Publication"]
+        rows = [
+            ["1", "Exclusive: WFP to extend Palantir contract despite concerns", "FRANCE 24"],
+            ["2", "Deep dive: the organizations still hiring in global development", "Devex Newswire"],
+        ]
+        widths = self._widths(header, rows, ["RIGHT", "LEFT", "LEFT"])
+        available = main.PAGE_WIDTH - main.LEFT_MARGIN - main.RIGHT_MARGIN
+        self.assertAlmostEqual(sum(widths), available, places=4)
+        # The `#` column holds one digit; it should be by far the narrowest.
+        self.assertLess(widths[0], available / 8)
+        self.assertGreater(widths[1], widths[2])
+
+    def test_ragged_rows_are_padded_not_widened(self):
+        widths = self._widths(["A", "B"], [["only one cell"]], ["LEFT", "LEFT"])
+        self.assertEqual(len(widths), 2)
+
+
 class Styles(unittest.TestCase):
     def test_black_text_mode_makes_every_style_black(self):
         styles = main.make_styles(black_text=True)
