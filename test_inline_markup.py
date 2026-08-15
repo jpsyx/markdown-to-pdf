@@ -352,5 +352,47 @@ class Styles(unittest.TestCase):
             self.assertEqual(style.textColor, main.BLACK)
 
 
+class BulletGlyphIsExtractable(unittest.TestCase):
+    """A list bullet must survive copy/paste and text extraction.
+
+    ReportLab's WinAnsi table follows Adobe in mapping every unused code above
+    40 to `bullet`, and picks the lowest such code (127) when encoding U+2022.
+    Extractors implement the strict table instead, where 127 is undefined, so
+    the bullet comes back as `(cid:127)` or vanishes. Encoding it at 149 — the
+    one code the strict table also calls `bullet` — makes every reader agree.
+    """
+
+    def _font(self):
+        from reportlab.pdfbase import pdfmetrics
+
+        return pdfmetrics.getFont(main.BULLET_FONT)
+
+    def test_bullet_encodes_to_the_unambiguous_winansi_code(self):
+        self.assertEqual("•".encode(self._font().encName), b"\x95")
+
+    def test_the_ambiguous_bullet_aliases_are_left_undefined(self):
+        vector = self._font().encoding.vector
+        self.assertEqual(vector[149], "bullet")
+        for code in (127, 129, 141, 143, 144, 157):
+            self.assertIsNone(vector[code])
+
+    def test_ordinary_characters_still_encode_as_winansi(self):
+        encoding = self._font().encName
+        self.assertEqual("Grill the plan".encode(encoding), b"Grill the plan")
+        self.assertEqual("café — naïve".encode(encoding), "café — naïve".encode("WinAnsiEncoding"))
+
+    def test_unordered_lists_render_with_the_bullet_safe_font(self):
+        story = []
+        buffer = [("unordered", "alpha", None, None), ("unordered", "beta", None, None)]
+        main.flush_bullets(buffer, story, main.make_styles())
+        self.assertEqual(story[0]._bulletFontName, main.BULLET_FONT)
+
+    def test_ordered_lists_are_unaffected(self):
+        story = []
+        buffer = [("ordered", "alpha", None, None)]
+        main.flush_bullets(buffer, story, main.make_styles())
+        self.assertEqual(story[0]._bulletType, "1")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

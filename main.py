@@ -32,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 import argparse
 import html
@@ -100,6 +100,62 @@ def _register_mono_font() -> str:
 
 
 CODE_FONT = _register_mono_font()
+
+# WinAnsi codes that Adobe (and so ReportLab) aliases to `bullet` purely because
+# they are otherwise unused. Strict decoder tables leave them undefined, so a
+# bullet written at one of these comes back as `(cid:127)` or disappears. 149 is
+# the single code both the loose and the strict tables call `bullet`.
+_BULLET_ALIAS_CODES = (127, 129, 141, 143, 144, 157)
+_BULLET_CODE = 149
+
+
+def _register_bullet_font() -> str:
+    """Register a Helvetica that encodes U+2022 at a code every reader knows.
+
+    ReportLab encodes `•` at the lowest WinAnsi code named `bullet`, which is
+    127 — a code the strict WinAnsi table does not define. The glyph draws
+    correctly, but pdfminer, pypdf and poppler all fail to recover it, so list
+    bullets are lost to copy/paste, search and screen readers. Clone WinAnsi
+    with the ambiguous aliases dropped and `•` pinned to 149.
+
+    Falls back to plain Helvetica if ReportLab's codec internals move; that
+    restores the unextractable bullet rather than breaking rendering, and the
+    test suite fails loudly when it happens.
+    """
+    try:
+        from reportlab.pdfbase.rl_codecs import RL_Codecs
+
+        # Derive the tables from the stock WinAnsi codec rather than hardcoding
+        # them, so this stays correct if ReportLab revises the encoding. Codes
+        # 0-31 are undefined in WinAnsi and simply drop out.
+        decoded: dict[int, int] = {}
+        for code in range(256):
+            try:
+                decoded[code] = ord(bytes([code]).decode("WinAnsiEncoding"))
+            except Exception:
+                continue
+        decoding_map = {code: char for code, char in decoded.items() if code not in _BULLET_ALIAS_CODES}
+        # Highest code first, so the lowest (canonical) code wins each character
+        # — e.g. a space encodes to 32, not to the 160 that also decodes to it.
+        encoding_map = {decoded[code]: code for code in sorted(decoded, reverse=True) if code not in _BULLET_ALIAS_CODES}
+        encoding_map[ord("•")] = _BULLET_CODE
+        # Dynamic codecs take (encoding_map, decoding_map) in that order.
+        RL_Codecs.add_dynamic_codec("bulletsafewinansi", encoding_map, decoding_map)
+        RL_Codecs.register()
+
+        encoding = pdfmetrics.Encoding("BulletSafeWinAnsi", base="WinAnsiEncoding")
+        for code in _BULLET_ALIAS_CODES:
+            encoding[code] = None
+        pdfmetrics.registerEncoding(encoding)
+        pdfmetrics.registerFont(pdfmetrics.Font("Helvetica-BulletSafe", "Helvetica", "BulletSafeWinAnsi"))
+        if "•".encode("BulletSafeWinAnsi") != bytes([_BULLET_CODE]):
+            return "Helvetica"
+        return "Helvetica-BulletSafe"
+    except Exception:
+        return "Helvetica"
+
+
+BULLET_FONT = _register_bullet_font()
 
 
 class _Color:
@@ -1180,7 +1236,7 @@ def flush_bullets(
 
         item_kwargs: dict = {
             "leftIndent": 18,
-            "bulletFontName": "Helvetica",
+            "bulletFontName": "Helvetica" if ordered else BULLET_FONT,
             "bulletFontSize": 10.5,
             "bulletColor": BODY_COLOR,
         }
@@ -1204,7 +1260,9 @@ def flush_bullets(
     list_kwargs = {
         "bulletType": "1" if ordered else "bullet",
         "leftIndent": 18,
-        "bulletFontName": "Helvetica",
+        # Unordered lists draw `•` from this font, so it must be the one that
+        # encodes the bullet at a code every extractor can decode.
+        "bulletFontName": "Helvetica" if ordered else BULLET_FONT,
         "bulletFontSize": 10.5,
         "bulletColor": BODY_COLOR,
         "spaceBefore": 0,
