@@ -32,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import argparse
 import html
@@ -306,6 +306,11 @@ LEFT_MARGIN = 56.2  # ReportLab frame padding adds 6 pt, yielding sample x=62.2
 RIGHT_MARGIN = 56.2
 TOP_MARGIN = 51.8   # ReportLab frame padding plus title metrics yield sample y=56.3
 BOTTOM_MARGIN = 42.0
+
+# Room a table cell keeps for its content once its padding is paid for. Below
+# roughly this, a cell cannot seat a single glyph and ReportLab raises rather
+# than clipping, so it is a floor on column width and not a style choice.
+MIN_CELL_CONTENT_WIDTH = 6.0
 
 
 def versioned_path(path: Path) -> Path:
@@ -832,10 +837,63 @@ def _parse_table_alignments(separator_line: str) -> list[str]:
     return alignments
 
 
+def _apply_width_floor(
+    widths: Sequence[float],
+    available: float,
+    floor: float,
+) -> list[float]:
+    """Raise every column to `floor`, paying for it from columns that have room.
+
+    A column narrower than its own cell padding leaves negative room for the
+    cell's content, and ReportLab raises rather than clipping ("flowable given
+    negative availWidth"). The floor is therefore a hard layout requirement, not
+    a preference.
+
+    Water-filling: share `available` out in proportion to the incoming widths,
+    pin any column that lands under `floor`, and redistribute what is left among
+    the rest. Each pass pins at least one more column, so it settles in at most
+    one pass per column, and the result always sums to `available`.
+
+    When even `floor` per column does not fit, every column gets `floor` and the
+    table overflows the text block. That is visible and recoverable; a crash is
+    neither.
+    """
+    n_cols = len(widths)
+    if n_cols == 0 or floor <= 0:
+        return [float(w) for w in widths]
+    if n_cols * floor >= available:
+        return [floor] * n_cols
+
+    base = [max(0.0, float(w)) for w in widths]
+    pinned = [False] * n_cols
+    for _ in range(n_cols):
+        free = [i for i in range(n_cols) if not pinned[i]]
+        if not free:
+            return [floor] * n_cols
+        budget = available - floor * (n_cols - len(free))
+        total_free = sum(base[i] for i in free)
+        if total_free <= 0:
+            share = budget / len(free)
+            out = [floor if pinned[i] else share for i in range(n_cols)]
+        else:
+            out = [
+                floor if pinned[i] else budget * (base[i] / total_free)
+                for i in range(n_cols)
+            ]
+        starved = [i for i in free if out[i] < floor]
+        if not starved:
+            return out
+        for i in starved:
+            pinned[i] = True
+    return [floor] * n_cols
+
+
 def fit_column_widths(
     min_widths: Sequence[float],
     max_widths: Sequence[float],
     available: float,
+    *,
+    floor: float = 0.0,
 ) -> list[float]:
     """Distribute `available` points across columns from their content widths.
 
@@ -855,6 +913,11 @@ def fit_column_widths(
     - **Even the minimums don't fit** — split in proportion to the minimums and
       let the cells wrap; there is no width that avoids it.
 
+    `floor` is the narrowest a column may end up. Pass the cell's padding plus a
+    little room for content: proportional splitting can otherwise hand a
+    one-character column less width than its own padding, which makes ReportLab
+    raise. It defaults to 0, leaving the three cases above untouched.
+
     The returned widths always sum to `available`.
     """
     n_cols = len(max_widths)
@@ -866,19 +929,22 @@ def fit_column_widths(
 
     total_max = sum(maxs)
     if total_max <= 0:
-        return even
+        return _apply_width_floor(even, available, floor)
 
     if total_max <= available:
         slack = available - total_max
-        return [w + slack * (w / total_max) for w in maxs]
+        widths = [w + slack * (w / total_max) for w in maxs]
+        return _apply_width_floor(widths, available, floor)
 
     total_min = sum(mins)
     if total_min >= available:
-        return even if total_min <= 0 else [available * (w / total_min) for w in mins]
+        widths = even if total_min <= 0 else [available * (w / total_min) for w in mins]
+        return _apply_width_floor(widths, available, floor)
 
     flex = total_max - total_min
     shortfall = total_max - available
-    return [hi - shortfall * ((hi - lo) / flex) for lo, hi in zip(mins, maxs)]
+    widths = [hi - shortfall * ((hi - lo) / flex) for lo, hi in zip(mins, maxs)]
+    return _apply_width_floor(widths, available, floor)
 
 
 def _text_width(text: str, style: ParagraphStyle) -> float:
@@ -988,7 +1054,11 @@ def render_table(
         for col in range(n_cols)
     ]
     col_widths = fit_column_widths(
-        *measure_column_widths(columns, left_pad + right_pad), available
+        *measure_column_widths(columns, left_pad + right_pad),
+        available,
+        # A column has to seat its own padding plus a glyph or two, or ReportLab
+        # is handed a negative content width and raises instead of wrapping.
+        floor=left_pad + right_pad + MIN_CELL_CONTENT_WIDTH,
     )
     table_style: list = [
         ("VALIGN", (0, 0), (-1, -1), "TOP"),

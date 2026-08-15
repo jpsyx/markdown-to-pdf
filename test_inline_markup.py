@@ -255,6 +255,39 @@ class ColumnWidths(unittest.TestCase):
     def test_zero_content_falls_back_to_equal_columns(self):
         self.assertEqual(main.fit_column_widths([0, 0], [0, 0], 400), [200, 200])
 
+    def test_narrow_column_never_shrinks_below_the_floor(self):
+        # A `#` column beside four columns whose longest unbreakable token is a
+        # long file path. The minimums cannot all fit, so widths are shared out
+        # in proportion; without a floor the `#` column gets ~7pt, which is less
+        # than the 16pt of cell padding, and ReportLab is handed a negative
+        # available width and raises.
+        mins = [22.0] + [416.0] * 4
+        maxs = [24.0] + [4016.0] * 4
+        widths = main.fit_column_widths(mins, maxs, 522.0, floor=22.0)
+        for width in widths:
+            self.assertGreaterEqual(width, 22.0)
+
+    def test_flooring_still_fills_the_available_space(self):
+        widths = main.fit_column_widths(
+            [22.0] + [416.0] * 4, [24.0] + [4016.0] * 4, 522.0, floor=22.0
+        )
+        self.assertAlmostEqual(sum(widths), 522.0, places=6)
+
+    def test_floor_is_opt_in_and_defaults_to_off(self):
+        # Without a floor the three original branches are untouched.
+        self.assertEqual(main.fit_column_widths([0, 0], [0, 0], 400), [200, 200])
+        widths = main.fit_column_widths([10, 40], [100, 300], 400)
+        self.assertAlmostEqual(widths[0], 100, places=6)
+
+    def test_floor_wider_than_the_page_still_returns_usable_widths(self):
+        # More columns than the text block can seat. There is no width that both
+        # fits the page and clears the padding, so every column gets the floor
+        # and the table overflows visibly rather than crashing.
+        widths = main.fit_column_widths([50.0] * 40, [80.0] * 40, 522.0, floor=22.0)
+        self.assertEqual(len(widths), 40)
+        for width in widths:
+            self.assertGreaterEqual(width, 22.0)
+
 
 class TableRendering(unittest.TestCase):
     def _widths(self, header, rows, alignments):
@@ -278,6 +311,38 @@ class TableRendering(unittest.TestCase):
     def test_ragged_rows_are_padded_not_widened(self):
         widths = self._widths(["A", "B"], [["only one cell"]], ["LEFT", "LEFT"])
         self.assertEqual(len(widths), 2)
+
+    def test_long_unbreakable_tokens_never_starve_a_narrow_column(self):
+        # The regression: a one-character `#` column beside four columns whose
+        # longest words are long file paths. Every column must leave room for
+        # its own 16pt of padding, or ReportLab raises "negative availWidth".
+        header = ["#", "Assumption", "Falsifier", "If falsified", "Owner"]
+        path = "shared/models/queries/StructuredQuery/sqlToStructuredQuery.ts:118"
+        rows = [
+            [
+                str(n),
+                f"An assumption naming {path} and {path}",
+                f"Falsified when {path} reports dialectArtefactSuspected",
+                f"Cancel the phase described in {path}",
+                f"{path}",
+            ]
+            for n in range(1, 9)
+        ]
+        widths = self._widths(header, rows, ["LEFT"] * 5)
+        available = main.PAGE_WIDTH - main.LEFT_MARGIN - main.RIGHT_MARGIN
+        self.assertAlmostEqual(sum(widths), available, places=4)
+        for width in widths:
+            self.assertGreater(width, 16.0)
+
+    def test_a_table_of_long_paths_actually_renders(self):
+        # End to end through ReportLab: the table that used to raise must wrap.
+        header = ["#", "Assumption", "Falsifier", "If falsified", "Owner"]
+        path = "shared/models/queries/StructuredQuery/sqlToStructuredQuery.ts:118"
+        rows = [[str(n), path, path, path, path] for n in range(1, 9)]
+        styles = main.make_styles()
+        table = main.render_table(header, rows, ["LEFT"] * 5, styles)
+        available = main.PAGE_WIDTH - main.LEFT_MARGIN - main.RIGHT_MARGIN
+        table.wrap(available, main.PAGE_HEIGHT)
 
 
 class Styles(unittest.TestCase):
