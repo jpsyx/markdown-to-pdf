@@ -85,6 +85,34 @@ echo "Installing dependencies…" >&2
   exit 1
 }
 
+# Mermaid diagrams need a headless browser, which is a Node toolchain rather
+# than a Python one, so it is provisioned separately and never fatally: a
+# document with no ```mermaid fence converts perfectly without it, and one with
+# a fence degrades to printing the diagram source. Both installs are scoped to
+# this clone plus puppeteer's shared cache; nothing is installed globally.
+if command -v npm >/dev/null 2>&1; then
+  echo "Installing the mermaid renderer…" >&2
+  if npm install --prefix "$SCRIPT_DIR" >&2; then
+    # puppeteer's own postinstall is commonly blocked by npm's allowScripts
+    # policy, which leaves mermaid-cli with no browser to drive. Asking for the
+    # browser explicitly works either way and overrides no security setting.
+    if ! "$SCRIPT_DIR/node_modules/.bin/mmdc" --version >/dev/null 2>&1; then
+      echo "note: mermaid-cli installed but not runnable yet" >&2
+    fi
+    npx --prefix "$SCRIPT_DIR" puppeteer browsers install chrome-headless-shell >&2 || {
+      echo "note: could not fetch the headless browser mermaid needs." >&2
+      echo "      Diagrams will print as source until this succeeds:" >&2
+      echo "        cd $SCRIPT_DIR && npx puppeteer browsers install chrome-headless-shell" >&2
+    }
+  else
+    echo "note: 'npm install' failed; mermaid diagrams will print as source." >&2
+  fi
+else
+  echo >&2
+  echo "note: npm not found, so mermaid diagrams will print as their source." >&2
+  echo "      Install Node.js (https://nodejs.org), then re-run ./install.sh." >&2
+fi
+
 # Fixed filename, so each run overwrites the previous launcher instead of adding
 # another one. It execs run.sh, which keeps the CLI defined in exactly one place
 # and picks up pulled code with no reinstall.

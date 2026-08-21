@@ -3,6 +3,9 @@
 
 Run:  python3 test_inline_markup.py
 """
+import contextlib
+import io
+import re
 import subprocess
 import sys
 import unittest
@@ -392,6 +395,286 @@ class BulletGlyphIsExtractable(unittest.TestCase):
         buffer = [("ordered", "alpha", None, None)]
         main.flush_bullets(buffer, story, main.make_styles())
         self.assertEqual(story[0]._bulletType, "1")
+
+
+def _item_texts(list_flowable):
+    """The rendered text of each ListItem in a ReportLab ListFlowable."""
+    texts = []
+    for item in list_flowable._content:
+        content = item._content[0] if hasattr(item, "_content") else item
+        texts.append(content.text)
+    return texts
+
+
+class SoftLineBreaksInLists(unittest.TestCase):
+    """A wrapped list item is one item, not an item plus a paragraph.
+
+    In Markdown a single newline inside a list item is a soft break: it exists
+    so the source can be wrapped at a sane column, and it folds into a space.
+    Splitting on it turns every wrapped bullet into its own one-item list with
+    an orphaned paragraph after it.
+    """
+
+    def test_wrapped_bullet_stays_one_item(self):
+        story = main.parse_markdown(
+            "- **Choice one.** Rejected:\n"
+            "  the alternative, because reasons.\n"
+            "- **Choice two.** Kept.\n"
+        )
+        lists = [f for f in story if type(f).__name__ == "ListFlowable"]
+        self.assertEqual(len(lists), 1)
+        self.assertEqual(
+            _item_texts(lists[0]),
+            [
+                "<b>Choice one.</b> Rejected: the alternative, because reasons.",
+                "<b>Choice two.</b> Kept.",
+            ],
+        )
+
+    def test_wrapped_bullet_emits_no_stray_paragraph(self):
+        story = main.parse_markdown("- one\n  continued\n")
+        self.assertEqual([type(f).__name__ for f in story], ["ListFlowable"])
+
+    def test_wrapped_ordered_item_stays_one_item(self):
+        story = main.parse_markdown(
+            "1. First item that wraps\n"
+            "   onto a second line.\n"
+            "2. Second item.\n"
+        )
+        lists = [f for f in story if type(f).__name__ == "ListFlowable"]
+        self.assertEqual(len(lists), 1)
+        self.assertEqual(
+            _item_texts(lists[0]),
+            ["First item that wraps onto a second line.", "Second item."],
+        )
+
+    def test_unindented_continuation_also_joins(self):
+        # CommonMark lazy continuation: the continuation need not be indented.
+        story = main.parse_markdown("- one\ncontinued\n")
+        lists = [f for f in story if type(f).__name__ == "ListFlowable"]
+        self.assertEqual(_item_texts(lists[0]), ["one continued"])
+
+    def test_three_continuation_lines_all_join(self):
+        story = main.parse_markdown("- a\n  b\n  c\n  d\n")
+        lists = [f for f in story if type(f).__name__ == "ListFlowable"]
+        self.assertEqual(_item_texts(lists[0]), ["a b c d"])
+
+    def test_blank_line_ends_the_list(self):
+        story = main.parse_markdown("- one\n\nA new paragraph.\n")
+        self.assertEqual(
+            [type(f).__name__ for f in story], ["ListFlowable", "Paragraph"]
+        )
+
+    def test_a_heading_ends_the_list(self):
+        story = main.parse_markdown("- one\n## Heading\n")
+        self.assertEqual(
+            [type(f).__name__ for f in story], ["ListFlowable", "Paragraph"]
+        )
+        self.assertEqual(story[1].text, "Heading")
+
+    def test_a_fence_ends_the_list(self):
+        story = main.parse_markdown("- one\n```\ncode\n```\n")
+        self.assertEqual([type(f).__name__ for f in story], ["ListFlowable", "Table"])
+
+    def test_a_table_ends_the_list(self):
+        story = main.parse_markdown("- one\n| a | b |\n| --- | --- |\n| 1 | 2 |\n")
+        self.assertEqual([type(f).__name__ for f in story], ["ListFlowable", "Table"])
+
+    def test_a_blockquote_ends_the_list(self):
+        story = main.parse_markdown("- one\n> quoted\n")
+        self.assertEqual([type(f).__name__ for f in story], ["ListFlowable", "Table"])
+
+
+class HardLineBreaks(unittest.TestCase):
+    """Two trailing spaces, or a trailing backslash, is the only real break."""
+
+    def test_two_trailing_spaces_break_the_line(self):
+        story = main.parse_markdown("alpha  \nbeta\n")
+        self.assertEqual(story[0].text, "alpha<br/>beta")
+
+    def test_more_than_two_trailing_spaces_still_break(self):
+        story = main.parse_markdown("alpha    \nbeta\n")
+        self.assertEqual(story[0].text, "alpha<br/>beta")
+
+    def test_trailing_backslash_breaks_the_line(self):
+        story = main.parse_markdown("alpha\\\nbeta\n")
+        self.assertEqual(story[0].text, "alpha<br/>beta")
+
+    def test_single_newline_is_a_space(self):
+        story = main.parse_markdown("alpha\nbeta\n")
+        self.assertEqual(story[0].text, "alpha beta")
+
+    def test_one_trailing_space_is_not_a_break(self):
+        story = main.parse_markdown("alpha \nbeta\n")
+        self.assertEqual(story[0].text, "alpha beta")
+
+    def test_last_line_of_a_paragraph_never_breaks(self):
+        story = main.parse_markdown("alpha  \n")
+        self.assertEqual(story[0].text, "alpha")
+
+    def test_hard_break_inside_a_bullet(self):
+        story = main.parse_markdown("- alpha  \n  beta\n")
+        lists = [f for f in story if type(f).__name__ == "ListFlowable"]
+        self.assertEqual(_item_texts(lists[0]), ["alpha<br/>beta"])
+
+
+def _code_cell(source, language, *, black_text=False):
+    """The single flowable inside the table a fenced code block renders to."""
+    table = main.code_block(
+        source, language, main.make_styles()["code"], black_text=black_text
+    )
+    return table._cellvalues[0][0]
+
+
+class SyntaxHighlighting(unittest.TestCase):
+    """A tagged fence is colored per token; an untagged one stays plain.
+
+    Highlighting degrades silently when Pygments is missing, so the dependency
+    itself is asserted: without it every fence renders plain and no test that
+    only checked the fallback would notice.
+    """
+
+    def test_pygments_is_installed(self):
+        self.assertTrue(
+            main._PYGMENTS_AVAILABLE,
+            "pygments must be installed for highlighting; see requirements.txt",
+        )
+
+    def test_typescript_is_highlighted(self):
+        cell = _code_cell(["const x: number = 1;"], "typescript")
+        self.assertEqual(type(cell).__name__, "XPreformatted")
+        self.assertIn("<font color=", cell.text)
+
+    def test_python_is_highlighted(self):
+        cell = _code_cell(["def f(x):", "    return x + 1"], "python")
+        self.assertEqual(type(cell).__name__, "XPreformatted")
+        self.assertIn("<font color=", cell.text)
+
+    def _visible(self, markup):
+        """The text a reader sees, with markup stripped and entities restored."""
+        text = re.sub(r"<[^>]+>", "", markup)
+        for entity, char in (("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&")):
+            text = text.replace(entity, char)
+        return text
+
+    def test_highlighting_loses_no_source(self):
+        # The guard for the whole bug class: reportlab's own pygments2xpre
+        # collapses every span between the first and last on a line, so
+        # `const x: number = 1;` came back as `const ;`. Exact equality is the
+        # only assertion that catches a silently dropped token.
+        source = "const x: number = 1;"
+        self.assertEqual(self._visible(main.highlight_to_xpre(source, "typescript")), source)
+
+    def test_highlighting_loses_no_source_across_lines(self):
+        source = "function f(a: string): void {\n  return;\n}"
+        self.assertEqual(self._visible(main.highlight_to_xpre(source, "typescript")), source)
+
+    def test_highlighting_adds_no_trailing_blank_line(self):
+        self.assertFalse(main.highlight_to_xpre("const x = 1;", "typescript").endswith("\n"))
+
+    def test_highlighting_escapes_markup_characters(self):
+        # `<` and `&` must reach the PDF as text, not as reportlab markup.
+        markup = main.highlight_to_xpre("if (a < b && c > d) {}", "typescript")
+        self.assertIn("&lt;", markup)
+        self.assertIn("&amp;", markup)
+        self.assertEqual(self._visible(markup), "if (a < b && c > d) {}")
+
+    def test_an_untagged_fence_is_plain(self):
+        cell = _code_cell(["just text"], "")
+        self.assertEqual(type(cell).__name__, "Preformatted")
+
+    def test_an_unknown_language_falls_back_to_plain(self):
+        cell = _code_cell(["whatever"], "not-a-real-language")
+        self.assertEqual(type(cell).__name__, "Preformatted")
+
+    def test_black_text_mode_is_plain(self):
+        # Printable-black mode wants no color anywhere, including code.
+        cell = _code_cell(["const x = 1;"], "typescript", black_text=True)
+        self.assertEqual(type(cell).__name__, "Preformatted")
+
+    def test_a_tagged_fence_survives_the_full_parse(self):
+        story = main.parse_markdown("```typescript\nconst x: number = 1;\n```\n")
+        self.assertEqual(len(story), 1)
+        cell = story[0]._cellvalues[0][0]
+        self.assertEqual(type(cell).__name__, "XPreformatted")
+
+
+class MermaidDiagrams(unittest.TestCase):
+    """A ```mermaid fence renders as a diagram, or degrades to its source.
+
+    Rendering shells out to mermaid-cli, so one render is shared across the
+    tests that only inspect the resulting flowable.
+    """
+
+    DIAGRAM = "flowchart TD\n    A[start] --> B[done]\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.story = main.parse_markdown(f"```mermaid\n{cls.DIAGRAM}```\n")
+
+    def test_a_renderer_is_available(self):
+        self.assertIsNotNone(
+            main.find_mermaid_renderer(),
+            "mermaid-cli must be installed; run ./install.sh",
+        )
+
+    def test_a_mermaid_fence_becomes_an_image(self):
+        self.assertEqual([type(f).__name__ for f in self.story], ["Image"])
+
+    def test_the_diagram_fits_the_content_width(self):
+        content_width = main.PAGE_WIDTH - main.LEFT_MARGIN - main.RIGHT_MARGIN
+        self.assertLessEqual(self.story[0].drawWidth, content_width)
+
+    def test_the_diagram_fits_the_page_height(self):
+        page_height = main.PAGE_HEIGHT - main.TOP_MARGIN - main.BOTTOM_MARGIN
+        self.assertLessEqual(self.story[0].drawHeight, page_height)
+
+    def test_the_diagram_keeps_its_aspect_ratio(self):
+        reader = main.render_mermaid(self.DIAGRAM)
+        self.assertIsNotNone(reader)
+        native_width, native_height = reader.getSize()
+        drawn = self.story[0]
+        self.assertAlmostEqual(
+            drawn.drawWidth / drawn.drawHeight,
+            native_width / native_height,
+            places=2,
+        )
+
+    def test_a_missing_renderer_falls_back_to_the_source(self):
+        original = main.find_mermaid_renderer
+        main.find_mermaid_renderer = lambda: None
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                story = main.parse_markdown(f"```mermaid\n{self.DIAGRAM}```\n")
+        finally:
+            main.find_mermaid_renderer = original
+        self.assertEqual([type(f).__name__ for f in story], ["Table"])
+        cell = story[0]._cellvalues[0][0]
+        self.assertIn("flowchart TD", "\n".join(cell.lines))
+
+    def test_a_missing_renderer_warns_on_stderr(self):
+        original = main.find_mermaid_renderer
+        main.find_mermaid_renderer = lambda: None
+        captured = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(captured):
+                main.parse_markdown(f"```mermaid\n{self.DIAGRAM}```\n")
+        finally:
+            main.find_mermaid_renderer = original
+        self.assertIn("mermaid", captured.getvalue().lower())
+
+    def test_unrenderable_source_falls_back_to_the_source(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            story = main.parse_markdown("```mermaid\n%%not a diagram%%\n```\n")
+        self.assertEqual([type(f).__name__ for f in story], ["Table"])
+
+    def test_the_language_tag_is_matched_case_insensitively(self):
+        story = main.parse_markdown(f"```Mermaid\n{self.DIAGRAM}```\n")
+        self.assertEqual([type(f).__name__ for f in story], ["Image"])
+
+    def test_a_non_mermaid_fence_is_still_a_code_block(self):
+        story = main.parse_markdown("```typescript\nconst x = 1;\n```\n")
+        self.assertEqual([type(f).__name__ for f in story], ["Table"])
 
 
 if __name__ == "__main__":

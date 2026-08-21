@@ -1,0 +1,8 @@
+{
+  "name": "markdown-to-pdf-render",
+  "private": true,
+  "description": "Headless renderer used by main.py for ```mermaid fences.",
+  "dependencies": {
+    "@mermaid-js/mermaid-cli": "^11.4.2"
+  }
+}

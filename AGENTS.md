@@ -55,10 +55,16 @@ rather than assuming a working directory or a fixed install path.
    machine-specific paths.
 3. **Do not track `__pycache__/`, `*.pyc`, or `.venv/`** (all gitignored) — they
    are regenerated per machine.
-4. **Keep runtime deps in `requirements.txt`.** Today: `reportlab`. That file is
-   what `install.sh` installs into the virtualenv, so a new dep is added there
-   and nowhere else.
-5. **Bump the version on every commit pushed to `main`.** `__version__` in
+4. **Keep Python runtime deps in `requirements.txt`.** Today: `reportlab` and
+   `pygments`. That file is what `install.sh` installs into the virtualenv, so a
+   new Python dep is added there and nowhere else.
+5. **The mermaid renderer is a separate, optional toolchain.** Diagrams need a
+   headless browser, so `mermaid-cli` is a Node dependency declared in
+   `package.json` and provisioned into the clone by `install.sh`. It must stay
+   **optional**: a document without a ```mermaid fence converts with no Node at
+   all, and one with a fence prints the diagram source rather than failing.
+   Never make the Python path import or require it.
+6. **Bump the version on every commit pushed to `main`.** `__version__` in
    `main.py` is the single source of truth (surfaced via `--version` / `-v`).
    Before you commit and push to `main`, raise it following semver: **patch**
    (`0.1.0` → `0.1.1`) for fixes and internal changes, **minor**

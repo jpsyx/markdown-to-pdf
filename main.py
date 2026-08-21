@@ -32,13 +32,17 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 import argparse
 import html
+import io
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterable, Sequence
 from xml.sax.saxutils import escape
@@ -47,11 +51,13 @@ from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     Flowable,
     KeepTogether,
+    Image,
     ListFlowable,
     ListItem,
     Paragraph,
@@ -64,11 +70,15 @@ from reportlab.platypus import (
 )
 
 try:
-    from reportlab.lib.pygments2xpre import pygments2xpre
+    from pygments import lex as _pygments_lex
+    from pygments.lexers import get_lexer_by_name
+    from pygments.styles import get_style_by_name
     from pygments.util import ClassNotFound
     _PYGMENTS_AVAILABLE = True
 except ImportError:
-    pygments2xpre = None
+    _pygments_lex = None
+    get_lexer_by_name = None
+    get_style_by_name = None
     ClassNotFound = Exception
     _PYGMENTS_AVAILABLE = False
 
@@ -389,6 +399,51 @@ def versioned_path(path: Path) -> Path:
         version += 1
 
 
+# Markdown has exactly two hard-break spellings: two or more trailing spaces,
+# and a trailing backslash. Every other newline is a *soft* break, which exists
+# so the source can be wrapped at a sane column and folds into a single space.
+# Treating a soft break as a real break is what turns one wrapped bullet into a
+# one-item list plus an orphaned paragraph.
+#
+# The break travels through the inline-markup pipeline as a control character
+# for the same reason code spans and links do: `escape()` would turn a literal
+# `<br/>` into `&lt;br/&gt;`. `inline_markup` swaps it for the real tag last.
+HARD_BREAK = "\x03"
+
+_TRAILING_SPACES_RE = re.compile(r"  +$")
+
+
+def split_hard_break(raw_line: str) -> tuple[str, bool]:
+    """Split a source line into its content and whether it ends in a hard break."""
+    if _TRAILING_SPACES_RE.search(raw_line):
+        return raw_line.rstrip(), True
+    content = raw_line.rstrip()
+    if content.endswith("\\") and not content.endswith("\\\\"):
+        return content[:-1].rstrip(), True
+    return content, False
+
+
+def append_soft_line(accumulated: str, line: str) -> str:
+    """Fold one more source line onto an accumulating block of text."""
+    if not accumulated:
+        return line
+    if accumulated.endswith(HARD_BREAK):
+        return accumulated + line
+    return accumulated + " " + line
+
+
+def join_soft_lines(lines: Iterable[str]) -> str:
+    """Join the source lines of one block into a single paragraph string.
+
+    A marker on the final line is dropped: there is nothing after it to break
+    away from, so it would render as a blank line at the end of the block.
+    """
+    joined = ""
+    for line in lines:
+        joined = append_soft_line(joined, line)
+    return joined.removesuffix(HARD_BREAK)
+
+
 def normalize_text(text: str) -> str:
     replacements = {
         "‑": "-",
@@ -536,7 +591,8 @@ def inline_markup(text: str, base_dir: str | None = None) -> str:
         text = re.sub(r"\x02LINK(\d+)\x02", _restore_link, text)
 
     text = _wrap_emojis(text)
-    return text
+    # Last, so the tag is never re-escaped by the passes above.
+    return text.replace(HARD_BREAK, "<br/>")
 
 
 def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[str, ParagraphStyle]:
@@ -747,6 +803,43 @@ def callout_box(lines: Iterable[str], style: ParagraphStyle) -> Table:
     return table
 
 
+# Pygments style whose token colors are read for highlighting. `default` is
+# built for a light background, which is what CODE_FILL is.
+HIGHLIGHT_STYLE = "default"
+
+
+def highlight_to_xpre(source: str, language: str) -> str:
+    """Convert source into ReportLab intra-paragraph markup, one span per token.
+
+    Written here rather than calling `reportlab.lib.pygments2xpre`, which
+    post-processes Pygments' HTML output with the greedy pattern
+    `<span class=".*">`. On any line carrying two or more spans that pattern
+    matches from the first span to the last and replaces the lot with a single
+    tag, silently deleting the code between them: `const x: number = 1;`
+    comes back as `const ;`.
+
+    Raises `ClassNotFound` when the language tag has no lexer, so the caller
+    can fall back to plain rendering.
+    """
+    lexer = get_lexer_by_name(language)
+    style = get_style_by_name(HIGHLIGHT_STYLE)
+    # Pygments guarantees the token stream ends in a newline, and that newline
+    # is often inside a colored whitespace token rather than loose at the end,
+    # so it has to come off the tokens and not off the joined markup.
+    tokens = [(t, v) for t, v in _pygments_lex(source, lexer) if v]
+    while tokens and not tokens[-1][1].strip("\n"):
+        tokens.pop()
+    if tokens:
+        tokens[-1] = (tokens[-1][0], tokens[-1][1].rstrip("\n"))
+
+    parts: list[str] = []
+    for token_type, value in tokens:
+        body = escape(value)
+        color = style.style_for_token(token_type).get("color")
+        parts.append(f'<font color="#{color}">{body}</font>' if color else body)
+    return "".join(parts)
+
+
 def code_block(
     lines: list[str], language: str, style: ParagraphStyle, *, black_text: bool = False
 ) -> Table:
@@ -756,17 +849,20 @@ def code_block(
     # <font color="..."> spans. Unknown languages fall back to plain rendering.
     text = "\n".join(lines)
     cell: Flowable
-    used_highlight = False
     if language and _PYGMENTS_AVAILABLE and not black_text:
         try:
-            highlighted = pygments2xpre(text, language=language)
+            highlighted = highlight_to_xpre(text, language)
             cell = XPreformatted(highlighted, style)
-            used_highlight = True
-        except (ClassNotFound, Exception):
+        except ClassNotFound:
+            # No lexer for this tag: render it as plain code rather than
+            # failing, since the fence is still readable content.
+            cell = Preformatted(text, style)
+        except Exception:
+            # A lexer that chokes on its input must not cost the whole
+            # document. Same fallback, deliberately broad.
             cell = Preformatted(text, style)
     else:
         cell = Preformatted(text, style)
-    _ = used_highlight  # currently unused, reserved for future per-language styling
     table = Table([[cell]], colWidths=[PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN])
     table.setStyle(
         TableStyle(
@@ -783,6 +879,109 @@ def code_block(
     table.spaceBefore = 6
     table.spaceAfter = 12
     return table
+
+
+# A ```mermaid fence is a diagram, not code. Rendering needs a headless
+# browser, so it goes out to mermaid-cli; when that is unavailable the fence
+# degrades to its own source rather than disappearing.
+MERMAID_FENCE_LANGUAGES = ("mermaid",)
+
+# Render at 3x and scale down in the PDF, so the diagram stays sharp in print
+# instead of resampling a screen-resolution bitmap.
+MERMAID_SCALE = 3
+MERMAID_TIMEOUT_SECONDS = 120
+
+
+def find_mermaid_renderer() -> list[str] | None:
+    """The argv prefix that renders a `.mmd` file, or None when none is usable.
+
+    Prefers the copy `install.sh` puts in the clone, so a rendered document
+    does not depend on what happens to be on `$PATH`.
+    """
+    local = Path(__file__).resolve().parent / "node_modules" / ".bin" / "mmdc"
+    if local.is_file() and os.access(local, os.X_OK):
+        return [str(local)]
+    on_path = shutil.which("mmdc")
+    if on_path:
+        return [on_path]
+    npx = shutil.which("npx")
+    if npx:
+        return [npx, "-y", "@mermaid-js/mermaid-cli"]
+    return None
+
+
+def render_mermaid(source: str) -> ImageReader | None:
+    """Render mermaid source to an in-memory PNG, or None when that fails.
+
+    The bytes are read back and the scratch directory deleted before returning,
+    because ReportLab opens an image lazily at build time and would otherwise
+    depend on a temp file outliving this call.
+    """
+    renderer = find_mermaid_renderer()
+    if renderer is None:
+        return None
+    scratch = Path(tempfile.mkdtemp(prefix="markdown-to-pdf-mermaid-"))
+    try:
+        diagram = scratch / "diagram.mmd"
+        png = scratch / "diagram.png"
+        diagram.write_text(source, encoding="utf-8")
+        try:
+            subprocess.run(
+                [
+                    *renderer,
+                    "-i", str(diagram),
+                    "-o", str(png),
+                    "-b", "white",
+                    "-s", str(MERMAID_SCALE),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=MERMAID_TIMEOUT_SECONDS,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return None
+        if not png.is_file():
+            return None
+        return ImageReader(io.BytesIO(png.read_bytes()))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def mermaid_block(
+    lines: list[str], style: ParagraphStyle, *, black_text: bool = False
+) -> Flowable:
+    """A rendered mermaid diagram, or its source when rendering is impossible."""
+    source = "\n".join(lines)
+    reader = render_mermaid(source)
+    if reader is None:
+        print(
+            _color(
+                "warning: could not render a mermaid diagram; printing its "
+                "source instead. Run ./install.sh to provision the renderer.",
+                _Color.YELLOW,
+                stream=sys.stderr,
+            ),
+            file=sys.stderr,
+        )
+        return code_block(lines, "", style, black_text=black_text)
+
+    native_width, native_height = reader.getSize()
+    # The PNG is MERMAID_SCALE times its natural size, so undo that before
+    # fitting, or every diagram renders three times too large.
+    width = native_width / MERMAID_SCALE
+    height = native_height / MERMAID_SCALE
+    fit = min(
+        (PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN) / width,
+        (PAGE_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN) / height,
+        1.0,
+    )
+    # `reader.fileName` is the in-memory buffer the reader wrapped; Image
+    # takes any object with `.read`, and seeks it itself.
+    diagram = Image(reader.fileName, width=width * fit, height=height * fit)
+    diagram.hAlign = "LEFT"
+    diagram.spaceBefore = 6
+    diagram.spaceAfter = 12
+    return diagram
 
 
 def blockquote(text: str, style: ParagraphStyle) -> Table:
@@ -1141,7 +1340,7 @@ def render_table(
 
 def flush_paragraph(buffer: list[str], story: list[Flowable], styles: dict[str, ParagraphStyle]) -> None:
     if buffer:
-        story.append(paragraph(" ".join(buffer).strip(), styles["body"]))
+        story.append(paragraph(join_soft_lines(buffer).strip(), styles["body"]))
         buffer.clear()
 
 
@@ -1171,6 +1370,12 @@ def flush_bullets(
 ) -> None:
     if not buffer:
         return
+    # An item whose last source line carried a hard break has nothing after it
+    # to break away from, so the marker would render as a trailing blank line.
+    buffer[:] = [
+        (kind, text.removesuffix(HARD_BREAK), state, number)
+        for kind, text, state, number in buffer
+    ]
     ordered = all(kind == "ordered" for kind, _, _, _ in buffer)
     has_checkbox = any(state is not None for _, _, state, _ in buffer)
     all_checkbox = has_checkbox and all(state is not None for _, _, state, _ in buffer)
@@ -1288,6 +1493,17 @@ def flush_quotes(buffer: list[str], story: list[Flowable], styles: dict[str, Par
         buffer.clear()
 
 
+# The only block openers that can still appear once fences, tables, quotes,
+# blank lines and list markers have been ruled out. A line matching one of
+# these ends the list above it instead of continuing its last item.
+_BLOCK_STARTERS = ("# ", "## ", "### ", "#### ")
+
+
+def _starts_a_block(stripped: str) -> bool:
+    """True when this line opens a block that cannot continue a list item."""
+    return stripped == "---" or stripped.startswith(_BLOCK_STARTERS)
+
+
 def parse_markdown(
     markdown: str,
     *,
@@ -1325,14 +1541,21 @@ def parse_markdown(
         # backticks/asterisks in code do not become formatting.
         if raw_line.lstrip().startswith("```"):
             if in_code_block:
-                story.append(
-                    code_block(
-                        code_buffer,
-                        code_language,
-                        styles["code"],
-                        black_text=black_text,
+                if code_language.lower() in MERMAID_FENCE_LANGUAGES:
+                    story.append(
+                        mermaid_block(
+                            code_buffer, styles["code"], black_text=black_text
+                        )
                     )
-                )
+                else:
+                    story.append(
+                        code_block(
+                            code_buffer,
+                            code_language,
+                            styles["code"],
+                            black_text=black_text,
+                        )
+                    )
                 code_buffer = []
                 code_language = ""
                 in_code_block = False
@@ -1347,8 +1570,12 @@ def parse_markdown(
             i += 1
             continue
 
-        line = raw_line.rstrip()
+        line, hard_break = split_hard_break(raw_line)
         stripped = line.strip()
+        # Buffered text carries the marker; block-recognition checks below run
+        # against the clean `stripped` so a trailing break cannot hide a
+        # heading or a horizontal rule.
+        buffered = stripped + HARD_BREAK if hard_break else stripped
 
         if not stripped:
             flush_all()
@@ -1358,7 +1585,7 @@ def parse_markdown(
         if stripped.startswith(">"):
             flush_paragraph(paragraph_buffer, story, styles)
             flush_bullets(bullet_buffer, story, styles)
-            quote_buffer.append(stripped.lstrip("> ").strip())
+            quote_buffer.append(buffered.lstrip("> ").strip())
             i += 1
             continue
 
@@ -1406,6 +1633,8 @@ def parse_markdown(
                 explicit_number = None
                 marker = unordered.group(1)
                 text = unordered.group(2).strip()
+            if hard_break:
+                text += HARD_BREAK
             if marker is None:
                 state: str | None = None
             elif marker.lower() == "x":
@@ -1428,6 +1657,16 @@ def parse_markdown(
             i += 1
             continue
 
+        # CommonMark lazy continuation: a line that is neither a new item nor
+        # the start of another block belongs to the item above it. Without
+        # this, every wrapped bullet ends its own list and the continuation
+        # lands as a body paragraph at the wrong indent.
+        if bullet_buffer and not _starts_a_block(stripped):
+            kind, text, state, number = bullet_buffer[-1]
+            bullet_buffer[-1] = (kind, append_soft_line(text, buffered), state, number)
+            i += 1
+            continue
+
         flush_bullets(bullet_buffer, story, styles)
 
         if stripped == "---":
@@ -1446,7 +1685,7 @@ def parse_markdown(
             flush_paragraph(paragraph_buffer, story, styles)
             story.append(paragraph(stripped[2:].strip(), styles["title"]))
         else:
-            paragraph_buffer.append(stripped)
+            paragraph_buffer.append(buffered)
 
         i += 1
 

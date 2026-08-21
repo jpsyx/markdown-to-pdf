@@ -23,6 +23,12 @@ markdown-to-pdf <file.md> --black-text    # pure-black printable text
 markdown-to-pdf --help                    # all options
 ```
 
+Fenced code blocks are syntax highlighted when the fence carries a language
+tag (```typescript, ```python, ```sql, ...); an untagged fence renders plain.
+A ```mermaid fence is rendered as a diagram, which needs Node.js: `install.sh`
+provisions the renderer, and without it the fence prints its own source so
+nothing is lost.
+
 Markdown links remain clickable in the PDF and are rendered without underlines
 for print readability. Use `--black-text` when the entire document, including
 headings and links, should be pure black (`#000000`).

@@ -32,8 +32,30 @@ absolute checkout path and can be run directly by anyone.
   pure string transforms that turn Markdown inline syntax (bold/italic, inline
   code) into ReportLab's mini-HTML. These are the most logic-dense, edge-case
   heavy functions, so they are covered directly by `test_inline_markup.py`.
+- **Line breaks** (`split_hard_break`, `append_soft_line`, `join_soft_lines`):
+  pure helpers implementing Markdown's break rules. Only two trailing spaces or
+  a trailing backslash are a real break; every other newline is a *soft* break
+  that folds into a space. The break travels through `inline_markup` as the
+  control character `HARD_BREAK`, because `escape()` would otherwise turn a
+  literal `<br/>` into visible text. Getting this wrong is what turned each
+  wrapped bullet into its own one-item list with an orphaned paragraph after
+  it, so `parse_markdown` also implements CommonMark lazy continuation: a line
+  that neither opens a block nor starts an item folds onto the item above.
 - **Block builders** (`paragraph`, `callout_box`, `code_block`, `blockquote`,
   `render_table`, and the `flush_*` helpers): turn buffered lines into Flowables.
+- **Syntax highlighting** (`highlight_to_xpre`): a tagged fence is tokenized by
+  Pygments and emitted as one `<font color>` span per token, into an
+  `XPreformatted`. This deliberately does not use `reportlab.lib.pygments2xpre`,
+  which post-processes Pygments' HTML with the greedy pattern
+  `<span class=".*">` and therefore collapses everything between the first and
+  last span on a line, silently deleting code (`const x: number = 1;` came back
+  as `const ;`). An unknown language tag falls back to plain rendering.
+- **Mermaid** (`find_mermaid_renderer`, `render_mermaid`, `mermaid_block`): a
+  ```mermaid fence shells out to `mermaid-cli`, which needs a headless browser,
+  and embeds the resulting PNG. Rendering happens at `MERMAID_SCALE` and is
+  scaled back down so print stays sharp. The whole path is optional by design:
+  with no renderer the fence degrades to a plain code block carrying the
+  diagram source, and the tool warns once on stderr.
 - **Tables** (`_split_table_cells`, `_parse_table_row`, `measure_column_widths`,
   `fit_column_widths`, `render_table`). Two pieces are worth knowing. Rows are
   split on *unescaped* pipes, so `\|` is a literal pipe inside a cell rather
@@ -52,6 +74,10 @@ absolute checkout path and can be run directly by anyone.
 
 `test_inline_markup.py` (stdlib `unittest`) pins the inline-markup behavior —
 the emphasis rules, underscore-in-identifiers literals, and code-span
-extraction — plus table row splitting and column fitting. New parsing behavior
+extraction — plus table row splitting, column fitting, soft and hard line
+breaks, list continuation, syntax highlighting, and mermaid rendering. Two of
+those suites assert a dependency directly (`pygments` is importable, a mermaid
+renderer resolves), because both features degrade silently when the dependency
+is absent and no behavioral test would notice. New parsing behavior
 should be added test-first here (red/green). The rendering/IO layers are
 exercised by running the tool on real Markdown.
