@@ -23,6 +23,10 @@ markdown-to-pdf <file.md> --black-text    # pure-black printable text
 markdown-to-pdf --help                    # all options
 ```
 
+Body text is set in a print serif (Charter where available), headings in a
+humanist sans, and code in Menlo, each chosen from a per-platform candidate list
+and falling back to the built-in PDF fonts when none is installed.
+
 Fenced code blocks are syntax highlighted when the fence carries a language
 tag (```typescript, ```python, ```sql, ...); an untagged fence renders plain.
 A ```mermaid fence is rendered as a diagram, which needs Node.js: `install.sh`

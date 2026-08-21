@@ -9,7 +9,7 @@ The visual system:
 - Helvetica / Helvetica-Bold / Helvetica-Oblique
 - Chapter title: #1F4E79, 22 pt, bold
 - Section headings: #2E75B6, 14 pt, bold
-- Body text: #000000, 10.5 pt, 15 pt leading
+- Body text: #000000, 10.5 pt, 16.5 pt leading
 - Left/right margins: 62.2 pt
 - Top margin: 56.3 pt
 - No page numbers, headers, or footers
@@ -32,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 import argparse
 import html
@@ -83,33 +83,169 @@ except ImportError:
     _PYGMENTS_AVAILABLE = False
 
 
-def _register_mono_font() -> str:
-    """Register a Unicode-capable monospace TTF for code blocks.
+# Text families, as candidate ladders. Each candidate maps a style to a file
+# and a subfont index: a `.ttc` collection uses one path with several indices,
+# while platforms that ship one file per style use several paths at index 0. A
+# candidate wins only if its normal face loads, and any style it lacks falls
+# back to that normal face, so a family is never half registered.
+#
+# Helvetica is deliberately not the first choice for text. It is a 1957 signage
+# grotesque with closed apertures, and `I`, `l` and `1` are near-identical
+# shapes, which is expensive in a document full of identifiers. It stays as the
+# last-resort fallback because it needs no file at all.
+SERIF_CANDIDATES = [
+    {
+        # Charter was drawn by Matthew Carter for low-resolution printing,
+        # which is this document's medium exactly.
+        "normal": ("/System/Library/Fonts/Supplemental/Charter.ttc", 0),
+        "bold": ("/System/Library/Fonts/Supplemental/Charter.ttc", 3),
+        "italic": ("/System/Library/Fonts/Supplemental/Charter.ttc", 1),
+        "boldItalic": ("/System/Library/Fonts/Supplemental/Charter.ttc", 2),
+    },
+    {
+        "normal": ("/System/Library/Fonts/Supplemental/Iowan Old Style.ttc", 0),
+        "bold": ("/System/Library/Fonts/Supplemental/Iowan Old Style.ttc", 1),
+        "italic": ("/System/Library/Fonts/Supplemental/Iowan Old Style.ttc", 2),
+        "boldItalic": ("/System/Library/Fonts/Supplemental/Iowan Old Style.ttc", 3),
+    },
+    {
+        "normal": ("/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf", 0),
+        "bold": ("/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf", 0),
+    },
+    {
+        "normal": ("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf", 0),
+        "bold": ("/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf", 0),
+        "italic": ("/usr/share/fonts/truetype/liberation/LiberationSerif-Italic.ttf", 0),
+        "boldItalic": ("/usr/share/fonts/truetype/liberation/LiberationSerif-BoldItalic.ttf", 0),
+    },
+    {
+        "normal": ("C:\\Windows\\Fonts\\constan.ttf", 0),
+        "bold": ("C:\\Windows\\Fonts\\constanb.ttf", 0),
+        "italic": ("C:\\Windows\\Fonts\\constani.ttf", 0),
+        "boldItalic": ("C:\\Windows\\Fonts\\constanz.ttf", 0),
+    },
+]
 
-    The default PDF Courier is a Type 1 font limited to WinAnsi; characters
-    outside that set (box-drawing, em dashes already normalized away, etc.)
-    render as tofu. Walk a small set of platform-specific candidate paths and
-    register the first one that exists under the name "MDCodeMono". If none
-    are available, fall back to plain Courier and accept the tofu risk.
+SANS_CANDIDATES = [
+    {
+        "normal": ("/System/Library/Fonts/Avenir Next.ttc", 7),
+        "bold": ("/System/Library/Fonts/Avenir Next.ttc", 0),
+        "italic": ("/System/Library/Fonts/Avenir Next.ttc", 4),
+        "boldItalic": ("/System/Library/Fonts/Avenir Next.ttc", 1),
+    },
+    {
+        "normal": ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
+        "bold": ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 0),
+    },
+    {
+        "normal": ("C:\\Windows\\Fonts\\segoeui.ttf", 0),
+        "bold": ("C:\\Windows\\Fonts\\segoeuib.ttf", 0),
+        "italic": ("C:\\Windows\\Fonts\\segoeuii.ttf", 0),
+        "boldItalic": ("C:\\Windows\\Fonts\\segoeuiz.ttf", 0),
+    },
+]
+
+# Menlo, not SF Mono: `/System/Library/Fonts/SFNSMono.ttf` is the *Light*
+# weight, the only one macOS ships there, and light mono prints anaemic. Menlo
+# carries all four faces at regular weight and slashes its zero.
+MONO_CANDIDATES = [
+    {
+        "normal": ("/System/Library/Fonts/Menlo.ttc", 0),
+        "bold": ("/System/Library/Fonts/Menlo.ttc", 1),
+        "italic": ("/System/Library/Fonts/Menlo.ttc", 2),
+        "boldItalic": ("/System/Library/Fonts/Menlo.ttc", 3),
+    },
+    {
+        "normal": ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 0),
+        "bold": ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 0),
+    },
+    {
+        "normal": ("/usr/share/fonts/dejavu/DejaVuSansMono.ttf", 0),
+    },
+    {
+        "normal": ("C:\\Windows\\Fonts\\consola.ttf", 0),
+        "bold": ("C:\\Windows\\Fonts\\consolab.ttf", 0),
+    },
+]
+
+_STYLE_SUFFIX = {"normal": "", "bold": "-Bold", "italic": "-Italic", "boldItalic": "-BoldItalic"}
+
+
+def register_font_family(candidates: Sequence[dict], fallback: str) -> str:
+    """Register the first usable candidate family and return its base name.
+
+    Returns `fallback` (a base-14 name, which needs no file) when no candidate
+    has a loadable normal face. Registers the family mapping too, so `<b>` and
+    `<i>` inside a paragraph resolve to real faces instead of silently
+    rendering as regular.
     """
-    candidates = [
-        "/System/Library/Fonts/SFNSMono.ttf",                       # macOS SF Mono
-        "/Library/Fonts/SFNSMono.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",      # Debian/Ubuntu
-        "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",               # Fedora/Arch
-        "C:\\Windows\\Fonts\\consola.ttf",                          # Windows Consolas
-    ]
-    for path in candidates:
-        if Path(path).exists():
-            try:
-                pdfmetrics.registerFont(TTFont("MDCodeMono", path))
-                return "MDCodeMono"
-            except Exception:
-                continue
-    return "Courier"
+    for candidate in candidates:
+        normal = candidate.get("normal")
+        if normal is None or not Path(normal[0]).exists():
+            continue
+        base = Path(normal[0]).stem.replace(" ", "") + "MD"
+        registered: dict[str, str] = {}
+        try:
+            for style, suffix in _STYLE_SUFFIX.items():
+                spec = candidate.get(style)
+                if spec is None or not Path(spec[0]).exists():
+                    continue
+                name = base + suffix
+                pdfmetrics.registerFont(TTFont(name, spec[0], subfontIndex=spec[1]))
+                registered[style] = name
+        except Exception:
+            continue
+        if "normal" not in registered:
+            continue
+        pdfmetrics.registerFontFamily(
+            base,
+            normal=registered["normal"],
+            bold=registered.get("bold", registered["normal"]),
+            italic=registered.get("italic", registered["normal"]),
+            boldItalic=registered.get(
+                "boldItalic", registered.get("bold", registered["normal"])
+            ),
+        )
+        return base
+    return fallback
 
 
-CODE_FONT = _register_mono_font()
+def _family_style(base: str, style: str, fallback: str) -> str:
+    """The concrete face name for one style of a registered family."""
+    if base == fallback:
+        return {
+            "bold": f"{fallback}-Bold",
+            "italic": "Times-Italic" if fallback == "Times-Roman" else f"{fallback}-Oblique",
+        }.get(style, fallback)
+    name = base + _STYLE_SUFFIX[style]
+    try:
+        pdfmetrics.getFont(name)
+        return name
+    except Exception:
+        return base
+
+
+BODY_FONT = register_font_family(SERIF_CANDIDATES, "Times-Roman")
+BODY_FONT_BOLD = _family_style(BODY_FONT, "bold", "Times-Roman")
+BODY_FONT_ITALIC = _family_style(BODY_FONT, "italic", "Times-Roman")
+
+HEADING_FONT = register_font_family(SANS_CANDIDATES, "Helvetica")
+HEADING_FONT_BOLD = _family_style(HEADING_FONT, "bold", "Helvetica")
+
+CODE_FONT = register_font_family(MONO_CANDIDATES, "Courier")
+
+
+def _face_name(font_name: str) -> str:
+    """The font's own internal name, used to catch an unintended weight."""
+    try:
+        face = pdfmetrics.getFont(font_name).face
+    except Exception:
+        return font_name
+    name = getattr(face, "name", None) or font_name
+    return name.decode("latin-1", "replace") if isinstance(name, bytes) else str(name)
+
+
+CODE_FONT_FACE_NAME = _face_name(CODE_FONT)
 
 # WinAnsi codes that Adobe (and so ReportLab) aliases to `bullet` purely because
 # they are otherwise unused. Strict decoder tables leave them undefined, so a
@@ -571,7 +707,7 @@ def inline_markup(text: str, base_dir: str | None = None) -> str:
     def _restore(match: re.Match) -> str:
         idx = int(match.group(1))
         body = escape(code_spans[idx])
-        return f'<font name="Courier" backColor="{CODE_FILL.hexval()}">{body}</font>'
+        return f'<font name="{CODE_FONT}" backColor="{CODE_FILL.hexval()}">{body}</font>'
 
     text = re.sub(r"\x01CODE(\d+)\x01", _restore, text)
 
@@ -612,9 +748,9 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
         "title": ParagraphStyle(
             "MDChapterTitle",
             parent=base["Heading1"],
-            fontName="Helvetica-Bold",
-            fontSize=22 - s,
-            leading=26.4 - s,
+            fontName=HEADING_FONT_BOLD,
+            fontSize=21 - s,
+            leading=25 - s,
             textColor=chapter_color,
             alignment=TA_LEFT,
             leftIndent=0,
@@ -626,9 +762,9 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
         "h2": ParagraphStyle(
             "MDSectionHeading",
             parent=base["Heading2"],
-            fontName="Helvetica-Bold",
-            fontSize=14 - s,
-            leading=17 - s,
+            fontName=HEADING_FONT_BOLD,
+            fontSize=15 - s,
+            leading=18 - s,
             textColor=section_color,
             alignment=TA_LEFT,
             leftIndent=0,
@@ -640,9 +776,9 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
         "h3": ParagraphStyle(
             "MDSubsectionHeading",
             parent=base["Heading3"],
-            fontName="Helvetica-Bold",
-            fontSize=11.5 - s,
-            leading=14.5 - s,
+            fontName=HEADING_FONT_BOLD,
+            fontSize=12.5 - s,
+            leading=15.5 - s,
             textColor=section_color,
             alignment=TA_LEFT,
             leftIndent=0,
@@ -654,9 +790,9 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
         "h4": ParagraphStyle(
             "MDMinorHeading",
             parent=base["Heading4"],
-            fontName="Helvetica-Bold",
-            fontSize=10.5 - s,
-            leading=13 - s,
+            fontName=HEADING_FONT_BOLD,
+            fontSize=11.5 - s,
+            leading=14.5 - s,
             textColor=chapter_color,
             alignment=TA_LEFT,
             leftIndent=0,
@@ -668,9 +804,9 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
         "body": ParagraphStyle(
             "MDBody",
             parent=base["BodyText"],
-            fontName="Helvetica",
+            fontName=BODY_FONT,
             fontSize=10.5 - s,
-            leading=15 - s,
+            leading=16.5 - s,
             textColor=body_color,
             alignment=TA_LEFT,
             leftIndent=0,
@@ -681,9 +817,9 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
         "table_cell": ParagraphStyle(
             "MDTableCell",
             parent=base["BodyText"],
-            fontName="Helvetica",
+            fontName=BODY_FONT,
             fontSize=10.5 - s,
-            leading=15 - s,
+            leading=16.5 - s,
             textColor=body_color,
             alignment=TA_LEFT,
             leftIndent=0,
@@ -694,9 +830,9 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
         "table_header": ParagraphStyle(
             "MDTableHeader",
             parent=base["BodyText"],
-            fontName="Helvetica-Bold",
+            fontName=BODY_FONT_BOLD,
             fontSize=10.5 - s,
-            leading=15 - s,
+            leading=16.5 - s,
             textColor=body_color,
             alignment=TA_LEFT,
             leftIndent=0,
@@ -707,9 +843,9 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
         "quote_plain": ParagraphStyle(
             "MDQuotePlain",
             parent=base["BodyText"],
-            fontName="Helvetica-Oblique",
+            fontName=BODY_FONT_ITALIC,
             fontSize=10.5 - s,
-            leading=15 - s,
+            leading=16.5 - s,
             textColor=chapter_color,
             alignment=TA_LEFT,
             leftIndent=0,
@@ -720,9 +856,9 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
         "callout": ParagraphStyle(
             "MDCallout",
             parent=base["BodyText"],
-            fontName="Helvetica-Oblique",
+            fontName=BODY_FONT_ITALIC,
             fontSize=10.5 - s,
-            leading=15 - s,
+            leading=16.5 - s,
             textColor=chapter_color,
             alignment=TA_LEFT,
             leftIndent=0,
@@ -733,9 +869,9 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
         "bullet": ParagraphStyle(
             "MDBullet",
             parent=base["BodyText"],
-            fontName="Helvetica",
+            fontName=BODY_FONT,
             fontSize=10.5 - s,
-            leading=15 - s,
+            leading=16.5 - s,
             textColor=body_color,
             alignment=TA_LEFT,
             leftIndent=0,
@@ -751,9 +887,9 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
         "scheduled": ParagraphStyle(
             "MDScheduled",
             parent=base["BodyText"],
-            fontName="Helvetica",
+            fontName=BODY_FONT,
             fontSize=10.5 - s,
-            leading=15 - s,
+            leading=16.5 - s,
             textColor=body_color,
             alignment=TA_LEFT,
             leftIndent=40,
@@ -765,8 +901,8 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
             "MDCode",
             parent=base["Code"],
             fontName=CODE_FONT,
-            fontSize=max(7.0, 9 - s),
-            leading=max(9.5, 12 - s),
+            fontSize=max(7.0, 9.5 - s),
+            leading=max(9.5, 13 - s),
             textColor=BODY_COLOR,
             alignment=TA_LEFT,
             leftIndent=0,

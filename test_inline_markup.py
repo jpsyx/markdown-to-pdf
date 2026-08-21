@@ -677,5 +677,74 @@ class MermaidDiagrams(unittest.TestCase):
         self.assertEqual([type(f).__name__ for f in story], ["Table"])
 
 
+class Typography(unittest.TestCase):
+    """Families are registered as families, and code is one font everywhere.
+
+    Helvetica for body text is a signage face: closed apertures, and `I`, `l`
+    and `1` are near-identical, which is expensive in a document full of
+    identifiers. These tests pin the replacements and the two defects found
+    alongside them.
+    """
+
+    def test_body_font_is_registered(self):
+        from reportlab.pdfbase import pdfmetrics
+        pdfmetrics.getFont(main.BODY_FONT)
+
+    def test_heading_font_is_registered(self):
+        from reportlab.pdfbase import pdfmetrics
+        pdfmetrics.getFont(main.HEADING_FONT)
+
+    def test_body_bold_is_a_distinct_face(self):
+        # `<b>` inside a paragraph resolves through the registered family, so a
+        # family whose bold maps back to its regular silently loses emphasis.
+        from reportlab.pdfbase import pdfmetrics
+        regular = pdfmetrics.getFont(main.BODY_FONT)
+        bold = pdfmetrics.getFont(main.BODY_FONT_BOLD)
+        self.assertNotEqual(regular.fontName, bold.fontName)
+
+    def test_body_family_is_mapped_for_inline_bold_and_italic(self):
+        from reportlab.lib.fonts import tt2ps
+        self.assertEqual(tt2ps(main.BODY_FONT, 1, 0), main.BODY_FONT_BOLD)
+        self.assertEqual(tt2ps(main.BODY_FONT, 0, 1), main.BODY_FONT_ITALIC)
+
+    def test_code_font_is_not_a_light_weight(self):
+        # /System/Library/Fonts/SFNSMono.ttf is SF Mono *Light*, so the previous
+        # candidate list produced anaemic code on every macOS run.
+        self.assertNotIn("light", main.CODE_FONT_FACE_NAME.lower())
+
+    def test_inline_code_uses_the_code_font(self):
+        # Code blocks used the discovered mono while inline spans hardcoded
+        # Courier, so the same identifier had two faces in one document.
+        markup = main.inline_markup("call `getNeededColumns` here")
+        self.assertIn(f'name="{main.CODE_FONT}"', markup)
+        self.assertNotIn('name="Courier"', markup)
+
+    def test_body_leading_is_open_enough_for_a_long_measure(self):
+        # The text block fits over 100 characters per line, well past the 65-75
+        # print ideal, and 80-column code blocks stop the column narrowing.
+        # Extra leading is what keeps the return sweep findable.
+        body = main.make_styles()["body"]
+        self.assertGreaterEqual(body.leading / body.fontSize, 1.5)
+
+    def test_heading_levels_are_visually_distinct(self):
+        styles = main.make_styles()
+        sizes = [styles[k].fontSize for k in ("title", "h2", "h3", "h4")]
+        self.assertEqual(sizes, sorted(sizes, reverse=True))
+        for bigger, smaller in zip(sizes, sizes[1:]):
+            self.assertGreaterEqual(bigger - smaller, 1.0)
+        self.assertGreater(sizes[-1], styles["body"].fontSize)
+
+    def test_code_block_still_fits_eighty_columns(self):
+        from reportlab.pdfbase import pdfmetrics
+        code = main.make_styles()["code"]
+        width = pdfmetrics.stringWidth("M" * 80, code.fontName, code.fontSize)
+        available = main.PAGE_WIDTH - main.LEFT_MARGIN - main.RIGHT_MARGIN - 20
+        self.assertLessEqual(width, available)
+
+    def test_families_fall_back_when_nothing_is_installed(self):
+        # A machine with none of the candidates must still produce a PDF.
+        self.assertEqual(main.register_font_family([], "Times-Roman"), "Times-Roman")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

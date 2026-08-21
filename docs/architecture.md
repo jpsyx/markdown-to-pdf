@@ -22,10 +22,26 @@ absolute checkout path and can be run directly by anyone.
 
 ## `main.py` in layers
 
-- **Fonts & color** (`_register_mono_font`, `_get_emoji_font`,
-  `_download_noto_emoji`, `_wrap_emojis`): register a monospace font for code,
-  and lazily fetch/cache a Noto emoji font under `~/.cache/markdown-to-pdf/` so
-  emoji render. Terminal color helpers (`_Color`, `_color`) are for CLI messages.
+- **Fonts & color** (`register_font_family`, `_get_emoji_font`,
+  `_download_noto_emoji`, `_wrap_emojis`): register three text families from
+  candidate ladders, and lazily fetch/cache a Noto emoji font under
+  `~/.cache/markdown-to-pdf/` so emoji render. Terminal color helpers
+  (`_Color`, `_color`) are for CLI messages.
+
+  The families are a serif for body text (Charter, then Iowan Old Style, then
+  DejaVu/Liberation, then Constantia, falling back to base-14 Times), a
+  humanist sans for headings (Avenir Next, DejaVu Sans, Segoe UI, falling back
+  to Helvetica), and a monospace for code (Menlo, DejaVu Sans Mono, Consolas,
+  falling back to Courier). Each candidate declares a file and a subfont index
+  per style, so a `.ttc` collection and a one-file-per-style platform both work,
+  and `registerFontFamily` is what makes `<b>` and `<i>` inside a paragraph
+  resolve to real faces rather than silently rendering as regular.
+
+  Two notes worth keeping. Helvetica is not the body default because it is a
+  signage grotesque whose `I`, `l` and `1` are near-identical, which is costly
+  in a document full of identifiers; it survives only as the fallback that needs
+  no file. And SF Mono is deliberately not a candidate: the only weight macOS
+  ships at `/System/Library/Fonts/SFNSMono.ttf` is Light, which prints anaemic.
 - **Styles** (`make_styles`): builds the `ParagraphStyle` set (headings, body,
   code, callouts, tables) and the page geometry constants (margins, brand colors).
 - **Inline markup** (`normalize_text`, `_extract_code_spans`, `inline_markup`):
