@@ -59,6 +59,19 @@ absolute checkout path and can be run directly by anyone.
   that neither opens a block nor starts an item folds onto the item above.
 - **Block builders** (`paragraph`, `callout_box`, `code_block`, `blockquote`,
   `render_table`, and the `flush_*` helpers): turn buffered lines into Flowables.
+- **Fence meta** (`parse_fence_info`): the text after ``` is a language plus an
+  optional highlight spec, `{2,4-6}`, 1-based to match what a reader counts.
+  Parsing is deliberately permissive: any brace group is taken as the spec, so
+  a typo inside it costs the highlighting and not the language tag with its
+  syntax colouring.
+- **Line highlighting** (`highlight_to_xpre_lines`, `_highlighted_code_table`):
+  a fence with a highlight spec becomes one table row per source line, so a
+  called-out line can carry a background across the full block width. A single
+  cell cannot do that, because `backColor` on a font tag stops at the end of the
+  glyphs. Tokenizing still happens once over the whole source, so multi-line
+  constructs are recognized, and each token's value is then split on newlines;
+  splitting the *markup* instead would leave an unclosed `<font>` on one line
+  and a stray closing tag on the next.
 - **Syntax highlighting** (`highlight_to_xpre`): a tagged fence is tokenized by
   Pygments and emitted as one `<font color>` span per token, into an
   `XPreformatted`. This deliberately does not use `reportlab.lib.pygments2xpre`,

@@ -746,5 +746,106 @@ class Typography(unittest.TestCase):
         self.assertEqual(main.register_font_family([], "Times-Roman"), "Times-Roman")
 
 
+class FenceInfoString(unittest.TestCase):
+    """The text after ``` carries a language and optional highlighted lines.
+
+    The convention is the one Docusaurus, Shiki and rehype-pretty-code use:
+    ```ts {2,4-6}. Real MDX (JSX inside Markdown) is out of scope; only the
+    meta string is read.
+    """
+
+    def test_language_only(self):
+        self.assertEqual(main.parse_fence_info("typescript"), ("typescript", frozenset()))
+
+    def test_language_and_single_line(self):
+        self.assertEqual(main.parse_fence_info("ts {3}"), ("ts", frozenset({3})))
+
+    def test_a_range_expands(self):
+        self.assertEqual(main.parse_fence_info("ts {2,4-6}"), ("ts", frozenset({2, 4, 5, 6})))
+
+    def test_highlight_without_a_language(self):
+        self.assertEqual(main.parse_fence_info("{1}"), ("", frozenset({1})))
+
+    def test_empty_info(self):
+        self.assertEqual(main.parse_fence_info(""), ("", frozenset()))
+
+    def test_a_malformed_spec_is_ignored_not_fatal(self):
+        # A fence is still readable content; a bad spec must not lose it.
+        self.assertEqual(main.parse_fence_info("ts {nope}"), ("ts", frozenset()))
+
+    def test_whitespace_inside_the_spec(self):
+        self.assertEqual(main.parse_fence_info("ts { 2 , 4 - 5 }"), ("ts", frozenset({2, 4, 5})))
+
+
+class PerLineHighlighting(unittest.TestCase):
+    """Highlighted lines need per-line markup, which tokens can straddle."""
+
+    SOURCE = 'function f(a: string): void {\n  /* a comment\n     spanning lines */\n  return;\n}'
+
+    def test_one_entry_per_source_line(self):
+        got = main.highlight_to_xpre_lines(self.SOURCE, "typescript")
+        self.assertEqual(len(got), len(self.SOURCE.split("\n")))
+
+    def test_every_line_closes_its_own_tags(self):
+        # A comment or string token spans lines, so a naive split would leave
+        # an unclosed <font> on one line and a stray </font> on the next, and
+        # ReportLab renders that as literal text or raises.
+        for line in main.highlight_to_xpre_lines(self.SOURCE, "typescript"):
+            self.assertEqual(line.count("<font"), line.count("</font>"), line)
+
+    def test_the_source_survives_line_by_line(self):
+        got = main.highlight_to_xpre_lines(self.SOURCE, "typescript")
+        visible = []
+        for line in got:
+            text = re.sub(r"<[^>]+>", "", line)
+            for entity, char in (("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&")):
+                text = text.replace(entity, char)
+            visible.append(text)
+        self.assertEqual("\n".join(visible), self.SOURCE)
+
+
+class HighlightedCodeBlocks(unittest.TestCase):
+    def _table(self, lines, language="typescript", highlight=frozenset()):
+        return main.code_block(
+            lines, language, main.make_styles()["code"], highlight_lines=highlight
+        )
+
+    def test_no_highlight_keeps_the_single_cell_shape(self):
+        table = self._table(["a = 1", "b = 2"])
+        self.assertEqual(len(table._cellvalues), 1)
+
+    def test_highlighting_uses_one_row_per_line(self):
+        table = self._table(["a = 1", "b = 2", "c = 3"], highlight=frozenset({2}))
+        self.assertEqual(len(table._cellvalues), 3)
+
+    def test_the_highlighted_row_gets_its_own_background(self):
+        table = self._table(["a = 1", "b = 2", "c = 3"], highlight=frozenset({2}))
+        rows = {cmd[1][1] for cmd in table._bkgrndcmds if cmd[3] == main.CODE_HIGHLIGHT_FILL}
+        self.assertEqual(rows, {1})  # zero-based row index for source line 2
+
+    def test_an_out_of_range_line_is_ignored(self):
+        table = self._table(["a = 1"], highlight=frozenset({9}))
+        highlighted = [c for c in table._bkgrndcmds if c[3] == main.CODE_HIGHLIGHT_FILL]
+        self.assertEqual(highlighted, [])
+
+    def test_the_highlight_fill_differs_from_the_block_fill(self):
+        self.assertNotEqual(main.CODE_HIGHLIGHT_FILL, main.CODE_FILL)
+
+    def test_parse_markdown_reads_the_spec_off_the_fence(self):
+        story = main.parse_markdown(
+            "```typescript {2}\nconst a = 1;\nconst b = 2;\n```\n"
+        )
+        self.assertEqual(len(story), 1)
+        self.assertEqual(len(story[0]._cellvalues), 2)
+        rows = {c[1][1] for c in story[0]._bkgrndcmds if c[3] == main.CODE_HIGHLIGHT_FILL}
+        self.assertEqual(rows, {1})
+
+    def test_a_highlighted_fence_still_highlights_syntax(self):
+        table = self._table(["const a = 1;", "const b = 2;"], highlight=frozenset({1}))
+        cell = table._cellvalues[0][0]
+        self.assertEqual(type(cell).__name__, "XPreformatted")
+        self.assertIn("<font color=", cell.text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

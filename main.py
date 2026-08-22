@@ -32,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 import argparse
 import html
@@ -976,8 +976,130 @@ def highlight_to_xpre(source: str, language: str) -> str:
     return "".join(parts)
 
 
+# Background for a line called out by the fence's highlight spec. Distinct
+# from CODE_FILL so the called-out line reads as emphasis rather than as the
+# block's own chrome.
+CODE_HIGHLIGHT_FILL = colors.HexColor("#FDF0C4")
+
+# The fence meta convention Docusaurus, Shiki and rehype-pretty-code share:
+# ```ts {2,4-6}. Only the meta string is read; MDX proper (JSX inside Markdown)
+# is a different feature and is not supported.
+# Deliberately permissive: any brace group is taken as the spec so that a typo
+# inside it costs only the highlighting, not the language tag and with it the
+# syntax colouring.
+_FENCE_HIGHLIGHT_RE = re.compile(r"\{([^}]*)\}")
+
+
+def parse_fence_info(info: str) -> tuple[str, frozenset[int]]:
+    """Split a fence's info string into its language and highlighted lines.
+
+    Line numbers are 1-based, matching what a reader counts. A spec that does
+    not parse is dropped rather than raised on: the fence is still readable
+    content, and losing it to a typo in the highlight list is a bad trade.
+    """
+    match = _FENCE_HIGHLIGHT_RE.search(info)
+    if match is None:
+        return info.strip(), frozenset()
+    language = info[: match.start()].strip()
+    lines: set[int] = set()
+    for part in match.group(1).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            first, _, last = part.partition("-")
+            try:
+                lines.update(range(int(first.strip()), int(last.strip()) + 1))
+            except ValueError:
+                continue
+        else:
+            try:
+                lines.add(int(part))
+            except ValueError:
+                continue
+    return language, frozenset(lines)
+
+
+def highlight_to_xpre_lines(source: str, language: str) -> list[str]:
+    """Per-line ReportLab markup for `source`, one entry per source line.
+
+    Tokenizing is done once over the whole source so multi-line constructs
+    (block comments, template literals) are still recognized, and each token's
+    value is then split on newlines. Splitting the *markup* instead would leave
+    an unclosed `<font>` on one line and a stray closing tag on the next, which
+    ReportLab renders as literal text.
+    """
+    lexer = get_lexer_by_name(language)
+    style = get_style_by_name(HIGHLIGHT_STYLE)
+    rendered: list[str] = [""]
+    for token_type, value in _pygments_lex(source, lexer):
+        if not value:
+            continue
+        color = style.style_for_token(token_type).get("color")
+        pieces = value.split("\n")
+        for index, piece in enumerate(pieces):
+            if index:
+                rendered.append("")
+            if not piece:
+                continue
+            body = escape(piece)
+            rendered[-1] += f'<font color="#{color}">{body}</font>' if color else body
+    # The lexer appends a trailing newline, which shows up as one empty line.
+    while len(rendered) > 1 and rendered[-1] == "":
+        rendered.pop()
+    return rendered
+
+
+def _highlighted_code_table(
+    lines: list[str],
+    language: str,
+    style: ParagraphStyle,
+    black_text: bool,
+    highlight_lines: frozenset[int],
+    width: float,
+) -> Table:
+    """One table row per source line, so highlighted lines can be shaded."""
+    markup: list[str] | None = None
+    if language and _PYGMENTS_AVAILABLE and not black_text:
+        try:
+            markup = highlight_to_xpre_lines("\n".join(lines), language)
+        except Exception:
+            markup = None
+
+    rows: list[list[Flowable]] = []
+    for index, line in enumerate(lines):
+        if markup is not None and index < len(markup):
+            rows.append([XPreformatted(markup[index] or " ", style)])
+        else:
+            rows.append([Preformatted(line or " ", style)])
+
+    commands = [
+        ("BACKGROUND", (0, 0), (-1, -1), CODE_FILL),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]
+    for number in sorted(highlight_lines):
+        if 1 <= number <= len(rows):
+            row = number - 1
+            commands.append(("BACKGROUND", (0, row), (-1, row), CODE_HIGHLIGHT_FILL))
+    # Breathing room at the block's edges only, so the lines stay on the
+    # monospace grid in between.
+    commands.append(("TOPPADDING", (0, 0), (-1, 0), 8))
+    commands.append(("BOTTOMPADDING", (0, len(rows) - 1), (-1, len(rows) - 1), 8))
+    table = Table(rows, colWidths=[width])
+    table.setStyle(TableStyle(commands))
+    return table
+
+
 def code_block(
-    lines: list[str], language: str, style: ParagraphStyle, *, black_text: bool = False
+    lines: list[str],
+    language: str,
+    style: ParagraphStyle,
+    *,
+    black_text: bool = False,
+    highlight_lines: frozenset[int] = frozenset(),
 ) -> Table:
     # Preserve whitespace and line breaks exactly. With no language tag, use a
     # plain Preformatted (mono font, no colors). With a language tag, run the
@@ -999,18 +1121,25 @@ def code_block(
             cell = Preformatted(text, style)
     else:
         cell = Preformatted(text, style)
-    table = Table([[cell]], colWidths=[PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN])
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), CODE_FILL),
-                ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-            ]
+    width = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
+    if highlight_lines:
+        # One row per line, so a called-out line can carry its own background
+        # across the full block width. A single cell cannot: `backColor` on a
+        # font tag stops at the end of the glyphs.
+        table = _highlighted_code_table(lines, language, style, black_text, highlight_lines, width)
+    else:
+        table = Table([[cell]], colWidths=[width])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), CODE_FILL),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                    ("TOPPADDING", (0, 0), (-1, -1), 8),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ]
+            )
         )
-    )
     table.hAlign = "LEFT"
     table.spaceBefore = 6
     table.spaceAfter = 12
@@ -1658,6 +1787,7 @@ def parse_markdown(
     quote_buffer: list[str] = []
     code_buffer: list[str] = []
     code_language: str = ""
+    code_highlight: frozenset[int] = frozenset()
     in_code_block = False
 
     def flush_all() -> None:
@@ -1690,14 +1820,18 @@ def parse_markdown(
                             code_language,
                             styles["code"],
                             black_text=black_text,
+                            highlight_lines=code_highlight,
                         )
                     )
                 code_buffer = []
                 code_language = ""
+                code_highlight = frozenset()
                 in_code_block = False
             else:
                 flush_all()
-                code_language = raw_line.lstrip()[3:].strip()
+                code_language, code_highlight = parse_fence_info(
+                    raw_line.lstrip()[3:]
+                )
                 in_code_block = True
             i += 1
             continue

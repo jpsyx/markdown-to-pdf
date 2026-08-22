@@ -29,6 +29,15 @@ and falling back to the built-in PDF fonts when none is installed.
 
 Fenced code blocks are syntax highlighted when the fence carries a language
 tag (```typescript, ```python, ```sql, ...); an untagged fence renders plain.
+A fence may also call out lines, using the meta-string convention Docusaurus and
+Shiki share:
+
+````
+```typescript {3,5-7}
+````
+
+Those lines get a shaded background so prose can point at them. MDX proper (JSX
+inside Markdown) is not supported; only the highlight spec is read.
 A ```mermaid fence is rendered as a diagram, which needs Node.js: `install.sh`
 provisions the renderer, and without it the fence prints its own source so
 nothing is lost.
