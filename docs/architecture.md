@@ -95,8 +95,9 @@ absolute checkout path and can be run directly by anyone.
   and prose columns get the room. The table always spans the full text block.
 - **Parser** (`parse_markdown`): the line-oriented state machine that walks the
   Markdown and dispatches to the block builders, flushing buffers at boundaries.
-- **Output** (`versioned_path`, `_prompt_overwrite`, `convert_markdown_to_pdf`,
-  `main`): resolve the output path (non-interactive mode writes a `-vN` variant
+- **Output** (`resolve_output_path`, `versioned_path`, `_prompt_overwrite`,
+  `convert_markdown_to_pdf`, `main`): resolve a file or directory output path
+  (non-interactive mode writes a `-vN` variant
   rather than overwriting), build the document, and handle CLI arguments.
 
 ## Testing

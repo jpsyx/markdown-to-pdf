@@ -1987,6 +1987,15 @@ def _prompt_overwrite(path: Path) -> bool:
     return answer in ("y", "yes")
 
 
+def resolve_output_path(markdown_path: Path, output_path: Path | None) -> Path:
+    """Resolve a file or directory output argument to the destination PDF."""
+    if output_path is None:
+        return markdown_path.with_suffix(".pdf")
+    if output_path.is_dir():
+        return output_path / markdown_path.with_suffix(".pdf").name
+    return output_path
+
+
 def convert_markdown_to_pdf(
     markdown_path: Path,
     output_path: Path | None = None,
@@ -2007,8 +2016,7 @@ def convert_markdown_to_pdf(
     # so they become absolute file:// URIs that open on click.
     global _LINK_BASE_DIR
     _LINK_BASE_DIR = str(markdown_path.resolve().parent)
-    if output_path is None:
-        output_path = markdown_path.with_suffix(".pdf")
+    output_path = resolve_output_path(markdown_path, output_path)
     if output_path.exists() and not _prompt_overwrite(output_path):
         output_path = versioned_path(output_path)
 
@@ -2052,7 +2060,12 @@ def main() -> None:
         help="Print the tool version and exit.",
     )
     parser.add_argument("markdown", type=Path, help="Markdown file path, e.g. chapter.md")
-    parser.add_argument("--out", type=Path, default=None, help="Optional PDF output path, e.g. chapter.pdf")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Optional PDF file or output directory, e.g. chapter.pdf or exports/",
+    )
     parser.add_argument(
         "--no-table-borders",
         dest="table_borders",

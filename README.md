@@ -19,6 +19,7 @@ so `markdown-to-pdf` is a real command available to any shell, script, or tool:
 ```sh
 markdown-to-pdf <file.md>                 # write <file>.pdf next to the input
 markdown-to-pdf <file.md> --out out.pdf   # explicit output path
+markdown-to-pdf <file.md> --out exports/  # write exports/<file>.pdf
 markdown-to-pdf <file.md> --black-text    # pure-black printable text
 markdown-to-pdf --help                    # all options
 ```

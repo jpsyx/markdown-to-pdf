@@ -8,7 +8,9 @@ import io
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 import main
 
@@ -39,6 +41,16 @@ class Version(unittest.TestCase):
         )
         self.assertEqual(out.returncode, 0)
         self.assertIn(main.__version__, out.stdout)
+
+
+class OutputPath(unittest.TestCase):
+    def test_output_directory_uses_markdown_filename(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            markdown = Path("notes/chapter.md")
+            self.assertEqual(
+                main.resolve_output_path(markdown, Path(output_dir)),
+                Path(output_dir) / "chapter.pdf",
+            )
 
 
 class UnderscoreEmphasis(unittest.TestCase):
