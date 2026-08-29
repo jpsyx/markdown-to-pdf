@@ -675,6 +675,33 @@ class LocalImages(unittest.TestCase):
         self.assertAlmostEqual(image.drawWidth / image.drawHeight, 2.0, places=2)
         self.assertLess(image.drawWidth, 1000)
 
+    def test_a_local_image_fits_inside_the_frame_padding(self):
+        image = main.local_image_block(
+            "assets/screenshot.png", str(self.markdown_directory)
+        )
+        frame_width = (
+            main.PAGE_WIDTH
+            - main.LEFT_MARGIN
+            - main.RIGHT_MARGIN
+            - 12
+        )
+
+        self.assertLessEqual(image.drawWidth, frame_width)
+
+    def test_a_tall_image_converts_without_a_layout_error(self):
+        portrait_path = self.assets_directory / "portrait.png"
+        _write_test_png(portrait_path, 100, 1000)
+        markdown_path = self.markdown_directory / "portrait.md"
+        output_path = self.root / "portrait.pdf"
+        markdown_path.write_text(
+            "![Portrait](assets/portrait.png)\n", encoding="utf-8"
+        )
+
+        result = main.convert_markdown_to_pdf(markdown_path, output_path)
+
+        self.assertEqual(result, output_path)
+        self.assertTrue(output_path.is_file())
+
     def test_conversion_resolves_from_the_markdown_directory(self):
         markdown_path = self.markdown_directory / "walkthrough.md"
         output_path = self.root / "walkthrough.pdf"

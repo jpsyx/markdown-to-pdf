@@ -32,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 
 import argparse
 import html
@@ -507,6 +507,7 @@ LEFT_MARGIN = 56.2  # ReportLab frame padding adds 6 pt, yielding sample x=62.2
 RIGHT_MARGIN = 56.2
 TOP_MARGIN = 51.8   # ReportLab frame padding plus title metrics yield sample y=56.3
 BOTTOM_MARGIN = 42.0
+FRAME_PADDING = 6.0  # ReportLab Frame default on every side
 
 # Room a table cell keeps for its content once its padding is paid for. Below
 # roughly this, a cell cannot seat a single glyph and ReportLab raises rather
@@ -1277,9 +1278,15 @@ def local_image_block(target: str, base_dir: str | None = None) -> Image:
         native_width, native_height = reader.getSize()
     except (OSError, ValueError) as error:
         raise ValueError(f"Could not read image file: {image_path}") from error
+    frame_width = (
+        PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - (2 * FRAME_PADDING)
+    )
+    frame_height = (
+        PAGE_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN - (2 * FRAME_PADDING)
+    )
     fit = min(
-        (PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN) / native_width,
-        (PAGE_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN) / native_height,
+        frame_width / native_width,
+        frame_height / native_height,
         1.0,
     )
     image = Image(

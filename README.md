@@ -46,7 +46,8 @@ nothing is lost.
 Standalone local images are embedded in the PDF. Relative paths resolve from
 the Markdown file's directory, so `![Picker](assets/picker.png)` works from any
 current working directory. Images retain their aspect ratio and shrink to fit
-the page without being enlarged.
+the page without being enlarged. Remote image URLs are rejected and never
+fetched.
 
 Markdown links remain clickable in the PDF and are rendered without underlines
 for print readability. Use `--black-text` when the entire document, including
