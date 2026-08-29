@@ -85,6 +85,10 @@ absolute checkout path and can be run directly by anyone.
   scaled back down so print stays sharp. The whole path is optional by design:
   with no renderer the fence degrades to a plain code block carrying the
   diagram source, and the tool warns once on stderr.
+- **Local images** (`_resolve_local_image_path`, `local_image_block`): a
+  standalone Markdown image resolves relative to the input file, rejects URI
+  schemes, and becomes an `Image` flowable. The image keeps its aspect ratio,
+  fits within the page's content area, and is never enlarged.
 - **Tables** (`_split_table_cells`, `_parse_table_row`, `measure_column_widths`,
   `fit_column_widths`, `render_table`). Two pieces are worth knowing. Rows are
   split on *unescaped* pipes, so `\|` is a literal pipe inside a cell rather
@@ -105,7 +109,8 @@ absolute checkout path and can be run directly by anyone.
 `test_inline_markup.py` (stdlib `unittest`) pins the inline-markup behavior —
 the emphasis rules, underscore-in-identifiers literals, and code-span
 extraction — plus table row splitting, column fitting, soft and hard line
-breaks, list continuation, syntax highlighting, and mermaid rendering. Two of
+breaks, list continuation, local images, syntax highlighting, and mermaid
+rendering. Two of
 those suites assert a dependency directly (`pygments` is importable, a mermaid
 renderer resolves), because both features degrade silently when the dependency
 is absent and no behavioral test would notice. New parsing behavior

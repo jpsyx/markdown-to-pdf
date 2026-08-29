@@ -32,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 import argparse
 import html
@@ -497,10 +497,9 @@ TABLE_BORDER = colors.HexColor("#D1D5DB")
 LINK_COLOR = colors.HexColor("#1155CC")
 _BLACK_TEXT = False
 
-# Base directory used to resolve *relative file* links to absolute file:// URIs
-# so they open on click. Set by convert_markdown_to_pdf() to the input .md's
-# parent. inline_markup() reads it only as a fallback when no explicit base_dir
-# is passed, so the string helper stays deterministic/testable.
+# Base directory used to resolve relative file links and images from the input
+# Markdown file. Set by convert_markdown_to_pdf() to the input file's parent.
+# Helpers read it only as a fallback when no explicit base_dir is passed.
 _LINK_BASE_DIR: str | None = None
 
 PAGE_WIDTH, PAGE_HEIGHT = letter
@@ -659,6 +658,8 @@ def _emphasis(text: str) -> str:
 # Markdown inline link: [text](target). Not preceded by ! (that's an image).
 # Target is any run without whitespace or a closing paren.
 _LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)")
+_IMAGE_BLOCK_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
+_URI_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 _EXTERNAL_HREF_RE = re.compile(r"^(?:https?|mailto|tel|ftp|file):", re.IGNORECASE)
 
 
@@ -1249,6 +1250,49 @@ def mermaid_block(
     return diagram
 
 
+def _resolve_local_image_path(target: str, base_dir: str | None) -> Path:
+    """Resolve one local image target without initiating network access."""
+    cleaned_target = target.strip()
+    if cleaned_target.startswith("<") and cleaned_target.endswith(">"):
+        cleaned_target = cleaned_target[1:-1].strip()
+    if _URI_SCHEME_RE.match(cleaned_target):
+        raise ValueError(
+            f"Image target must be a local image path: {cleaned_target}"
+        )
+    image_path = Path(cleaned_target)
+    if not image_path.is_absolute() and base_dir is not None:
+        image_path = Path(base_dir) / image_path
+    return image_path.resolve()
+
+
+def local_image_block(target: str, base_dir: str | None = None) -> Image:
+    """Build a fitted image flowable from a local Markdown image target."""
+    if base_dir is None:
+        base_dir = _LINK_BASE_DIR
+    image_path = _resolve_local_image_path(target, base_dir)
+    if not image_path.is_file():
+        raise FileNotFoundError(f"Image file not found: {image_path}")
+    try:
+        reader = ImageReader(str(image_path))
+        native_width, native_height = reader.getSize()
+    except (OSError, ValueError) as error:
+        raise ValueError(f"Could not read image file: {image_path}") from error
+    fit = min(
+        (PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN) / native_width,
+        (PAGE_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN) / native_height,
+        1.0,
+    )
+    image = Image(
+        str(image_path),
+        width=native_width * fit,
+        height=native_height * fit,
+    )
+    image.hAlign = "LEFT"
+    image.spaceBefore = 6
+    image.spaceAfter = 12
+    return image
+
+
 def blockquote(text: str, style: ParagraphStyle) -> Table:
     cell = Paragraph(inline_markup(text), style)
     table = Table([[cell]], colWidths=[PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN])
@@ -1766,7 +1810,11 @@ _BLOCK_STARTERS = ("# ", "## ", "### ", "#### ")
 
 def _starts_a_block(stripped: str) -> bool:
     """True when this line opens a block that cannot continue a list item."""
-    return stripped == "---" or stripped.startswith(_BLOCK_STARTERS)
+    return (
+        stripped == "---"
+        or stripped.startswith(_BLOCK_STARTERS)
+        or _IMAGE_BLOCK_RE.fullmatch(stripped) is not None
+    )
 
 
 def parse_markdown(
@@ -1842,6 +1890,7 @@ def parse_markdown(
 
         line, hard_break = split_hard_break(raw_line)
         stripped = line.strip()
+        image_match = _IMAGE_BLOCK_RE.fullmatch(stripped)
         # Buffered text carries the marker; block-recognition checks below run
         # against the clean `stripped` so a trailing break cannot hide a
         # heading or a horizontal rule.
@@ -1942,6 +1991,9 @@ def parse_markdown(
         if stripped == "---":
             flush_paragraph(paragraph_buffer, story, styles)
             story.append(Spacer(1, 8))
+        elif image_match:
+            flush_paragraph(paragraph_buffer, story, styles)
+            story.append(local_image_block(image_match.group(2), _LINK_BASE_DIR))
         elif stripped.startswith("#### "):
             flush_paragraph(paragraph_buffer, story, styles)
             story.append(paragraph(stripped[5:].strip(), styles["h4"]))
@@ -2012,8 +2064,8 @@ def convert_markdown_to_pdf(
         )
     if not markdown_path.exists():
         raise FileNotFoundError(f"Markdown file not found: {markdown_path}")
-    # Relative file links in the markdown resolve against the .md's own folder,
-    # so they become absolute file:// URIs that open on click.
+    # Relative file links and images resolve against the Markdown file's own
+    # folder, independent of the shell's current working directory.
     global _LINK_BASE_DIR
     _LINK_BASE_DIR = str(markdown_path.resolve().parent)
     output_path = resolve_output_path(markdown_path, output_path)

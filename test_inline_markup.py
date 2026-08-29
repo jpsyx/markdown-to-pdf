@@ -5,11 +5,14 @@ Run:  python3 test_inline_markup.py
 """
 import contextlib
 import io
+import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 import main
@@ -609,6 +612,131 @@ class SyntaxHighlighting(unittest.TestCase):
         self.assertEqual(len(story), 1)
         cell = story[0]._cellvalues[0][0]
         self.assertEqual(type(cell).__name__, "XPreformatted")
+
+
+def _write_test_png(path: Path, width: int, height: int) -> None:
+    """Write a solid RGB PNG using only the standard library."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        checksum = zlib.crc32(kind + data) & 0xFFFFFFFF
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", checksum)
+        )
+
+    row = b"\x00" + (b"\x33\x66\x99" * width)
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(row * height))
+        + chunk(b"IEND", b"")
+    )
+    path.write_bytes(png)
+
+
+class LocalImages(unittest.TestCase):
+    def setUp(self):
+        self.temp_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_directory.name)
+        self.markdown_directory = self.root / "guide"
+        self.assets_directory = self.markdown_directory / "assets"
+        self.assets_directory.mkdir(parents=True)
+        self.image_path = self.assets_directory / "screenshot.png"
+        _write_test_png(self.image_path, 1000, 500)
+
+    def tearDown(self):
+        main._LINK_BASE_DIR = None
+        self.temp_directory.cleanup()
+
+    def parse(self, markdown: str):
+        main._LINK_BASE_DIR = str(self.markdown_directory)
+        return main.parse_markdown(markdown)
+
+    def test_a_local_image_becomes_an_image_flowable(self):
+        story = self.parse("![Screenshot](assets/screenshot.png)\n")
+
+        self.assertEqual([type(item).__name__ for item in story], ["Image"])
+        self.assertEqual(
+            Path(story[0].filename).resolve(), self.image_path.resolve()
+        )
+
+    def test_a_local_image_preserves_ratio_and_fits_the_page(self):
+        image = main.local_image_block(
+            "assets/screenshot.png", str(self.markdown_directory)
+        )
+        content_width = main.PAGE_WIDTH - main.LEFT_MARGIN - main.RIGHT_MARGIN
+        content_height = main.PAGE_HEIGHT - main.TOP_MARGIN - main.BOTTOM_MARGIN
+
+        self.assertLessEqual(image.drawWidth, content_width)
+        self.assertLessEqual(image.drawHeight, content_height)
+        self.assertAlmostEqual(image.drawWidth / image.drawHeight, 2.0, places=2)
+        self.assertLess(image.drawWidth, 1000)
+
+    def test_conversion_resolves_from_the_markdown_directory(self):
+        markdown_path = self.markdown_directory / "walkthrough.md"
+        output_path = self.root / "walkthrough.pdf"
+        markdown_path.write_text(
+            "![Screenshot](assets/screenshot.png)\n", encoding="utf-8"
+        )
+        other_directory = self.root / "elsewhere"
+        other_directory.mkdir()
+        previous_directory = Path.cwd()
+        image_calls = []
+        original_image_block = getattr(main, "local_image_block", None)
+
+        def record_image_block(target, base_dir=None):
+            image_calls.append((target, base_dir))
+            return main.Spacer(1, 1)
+
+        main.local_image_block = record_image_block
+        try:
+            os.chdir(other_directory)
+            result = main.convert_markdown_to_pdf(markdown_path, output_path)
+        finally:
+            os.chdir(previous_directory)
+            if original_image_block is None:
+                del main.local_image_block
+            else:
+                main.local_image_block = original_image_block
+
+        self.assertEqual(result, output_path)
+        self.assertTrue(output_path.is_file())
+        self.assertEqual(
+            image_calls,
+            [("assets/screenshot.png", str(self.markdown_directory.resolve()))],
+        )
+
+    def test_an_image_after_a_list_is_a_separate_block(self):
+        story = self.parse("- item\n![Screenshot](assets/screenshot.png)\n")
+
+        self.assertEqual(
+            [type(item).__name__ for item in story],
+            ["ListFlowable", "Image"],
+        )
+
+    def test_a_missing_image_reports_the_resolved_path(self):
+        expected_path = (self.markdown_directory / "assets/missing.png").resolve()
+
+        with self.assertRaisesRegex(
+            FileNotFoundError, re.escape(str(expected_path))
+        ):
+            self.parse("![Missing](assets/missing.png)\n")
+
+    def test_an_unreadable_image_reports_the_resolved_path(self):
+        unreadable_path = self.assets_directory / "unreadable.png"
+        unreadable_path.write_text("not an image", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            ValueError, re.escape(str(unreadable_path.resolve()))
+        ):
+            self.parse("![Unreadable](assets/unreadable.png)\n")
+
+    def test_a_remote_image_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "local image path"):
+            self.parse("![Remote](https://example.com/image.png)\n")
 
 
 class MermaidDiagrams(unittest.TestCase):
