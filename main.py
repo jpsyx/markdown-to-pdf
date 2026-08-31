@@ -32,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 
 import argparse
 import html
@@ -355,8 +355,11 @@ def _color(text: str, *codes: str, stream=None) -> str:
 # Preferred font is Noto Emoji (monochrome) — full Unicode emoji coverage,
 # permissive license, ~430 KB. Cached at ~/.cache/markdown-to-pdf/ and
 # downloaded on first run where the source markdown actually contains emoji.
-# Apple Symbols is the partial fallback (covers ⚙ ⌛ ⚠ arrows but misses 1F4xx
-# pictographs).
+# Apple Symbols is registered alongside it, not merely as a whole-font
+# fallback: Noto covers 1F4xx pictographs Apple Symbols misses, but Apple
+# Symbols covers plain arrows (→ ⚙ ⌛ ⚠) and technical symbols Noto doesn't
+# ship. `_wrap_emojis` picks per-character, via `_font_covers`, whichever
+# registered font actually has the glyph.
 
 _NOTO_EMOJI_URL = (
     # Monochrome Noto Emoji variable font, served from the google/fonts repo.
@@ -369,7 +372,8 @@ _EMOJI_CACHE_DIR = Path.home() / ".cache" / "markdown-to-pdf"
 _EMOJI_CACHE_PATH = _EMOJI_CACHE_DIR / "NotoEmoji-Variable.ttf"
 
 EMOJI_RE = re.compile(
-    "[⌀-⏿"            # Misc Technical (⌛ ⌨ ⏰ ⏳ ...)
+    "[←-⇿"            # Arrows (→ ← ⇒ ⇔ ...) — plain "A → B" flow arrows
+    "⌀-⏿"            # Misc Technical (⌛ ⌨ ⏰ ⏳ ...)
     "①-⓿"             # Enclosed Alphanumerics
     "■-➿"             # Misc Symbols, Dingbats (★ ☀ ☎ ✂ ✅ ✈ ✨ ...)
     "⬀-⯿"             # Misc Symbols and Arrows (⬇ ⭐ ...)
@@ -379,8 +383,8 @@ EMOJI_RE = re.compile(
 )
 
 
-_emoji_font_name: str | None = None
-_emoji_font_tried: bool = False
+_emoji_fonts: list[str] = []
+_emoji_fonts_tried: bool = False
 
 
 def _try_register_emoji_font(path: Path, registered_name: str) -> bool:
@@ -443,46 +447,83 @@ def _download_noto_emoji() -> bool:
         return False
 
 
-def _get_emoji_font() -> str | None:
-    """Return the registered emoji font name, or None if no font is available.
+def _get_emoji_fonts() -> list[str]:
+    """Return the names of the registered emoji-ish fonts, most-preferred
+    first: Noto Emoji (broad pictograph coverage) then Apple Symbols (a
+    narrower fallback that covers plain arrows and technical symbols Noto
+    doesn't ship, per the module note above).
 
-    Lazy and memoized: the font is only registered (or downloaded) on the
-    first call. Subsequent calls return the cached result.
+    Lazy and memoized: fonts are only registered (or downloaded) on the
+    first call. Subsequent calls return the cached result. Both are
+    registered independently — neither is a fallback for the other's
+    *failure* to load, since a glyph missing from one may still be present
+    in the other (see `_font_covers`).
     """
-    global _emoji_font_name, _emoji_font_tried
-    if _emoji_font_tried:
-        return _emoji_font_name
-    _emoji_font_tried = True
+    global _emoji_fonts, _emoji_fonts_tried
+    if _emoji_fonts_tried:
+        return _emoji_fonts
+    _emoji_fonts_tried = True
 
-    if _EMOJI_CACHE_PATH.exists() and _try_register_emoji_font(_EMOJI_CACHE_PATH, "MDEmoji"):
-        _emoji_font_name = "MDEmoji"
-        return _emoji_font_name
+    fonts: list[str] = []
 
-    if _download_noto_emoji() and _try_register_emoji_font(_EMOJI_CACHE_PATH, "MDEmoji"):
-        _emoji_font_name = "MDEmoji"
-        return _emoji_font_name
+    have_noto = _EMOJI_CACHE_PATH.exists() or _download_noto_emoji()
+    if have_noto and _try_register_emoji_font(_EMOJI_CACHE_PATH, "MDEmoji"):
+        fonts.append("MDEmoji")
 
     apple_symbols = Path("/System/Library/Fonts/Apple Symbols.ttf")
-    if apple_symbols.exists() and _try_register_emoji_font(apple_symbols, "MDEmoji"):
-        _emoji_font_name = "MDEmoji"
-        return _emoji_font_name
+    if apple_symbols.exists() and _try_register_emoji_font(apple_symbols, "MDEmojiSymbols"):
+        fonts.append("MDEmojiSymbols")
 
+    _emoji_fonts = fonts
+    return _emoji_fonts
+
+
+def _font_covers(font_name: str, codepoint: int) -> bool:
+    """Return True if the registered font `font_name` has a glyph for
+    `codepoint`, so callers don't wrap a character in a font that can't
+    render it either (which just moves the tofu box rather than fixing it).
+    """
+    try:
+        face = pdfmetrics.getFont(font_name).face
+    except Exception:
+        return False
+    return codepoint in face.charWidths
+
+
+def _font_for(codepoint: int) -> str | None:
+    """Return the first registered emoji-ish font that has a glyph for
+    `codepoint`, or None if none of them do.
+    """
+    for font in _get_emoji_fonts():
+        if _font_covers(font, codepoint):
+            return font
     return None
 
 
 def _wrap_emojis(text: str) -> str:
-    """Wrap each emoji codepoint in a <font name="MDEmoji">...</font> span.
+    """Wrap each emoji codepoint in a <font name="...">...</font> span,
+    picking the first registered emoji-ish font that actually has a glyph
+    for it. A character none of them cover is left unwrapped — falling
+    through to the body font, the same as before any emoji handling existed
+    — rather than wrapped in a font equally unable to render it.
 
     Must be called after `escape()` so the inserted XML tags survive into the
     Paragraph renderer. Bails out cheaply when there are no emoji characters
-    in the text, which avoids ever loading the emoji font for plain content.
+    in the text, which avoids ever loading the emoji fonts for plain content.
     """
     if not EMOJI_RE.search(text):
         return text
-    font = _get_emoji_font()
-    if font is None:
+    fonts = _get_emoji_fonts()
+    if not fonts:
         return text
-    return EMOJI_RE.sub(lambda m: f'<font name="{font}">{m.group(0)}</font>', text)
+
+    def _repl(match: re.Match) -> str:
+        font = _font_for(ord(match.group(0)[0]))
+        if font is None:
+            return match.group(0)
+        return f'<font name="{font}">{match.group(0)}</font>'
+
+    return EMOJI_RE.sub(_repl, text)
 
 
 CHAPTER_BLUE = colors.HexColor("#1F4E79")
@@ -1698,7 +1739,9 @@ def flush_bullets(
     # Force-register the emoji font when we have any checkbox items rendered
     # as bullets — the bullet text bypasses _wrap_emojis (which only runs on
     # paragraph body text), so we need to set bulletFontName explicitly.
-    checkbox_bullet_font = (_get_emoji_font() or "Helvetica") if has_checkbox else "Helvetica"
+    checkbox_bullet_font = (
+        (_font_for(ord(CHECKBOX_UNCHECKED)) or "Helvetica") if has_checkbox else "Helvetica"
+    )
 
     # Honor the explicit number on the first ordered-list item when present.
     # Lets agendas split an ordered list around plain-text "scheduled" lines

@@ -12,10 +12,42 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import zlib
 from pathlib import Path
 
 import main
+
+
+class EmojiWrapping(unittest.TestCase):
+    def test_arrow_is_recognized_as_an_emoji(self):
+        # U+2192 RIGHTWARDS ARROW sits in the Arrows block (U+2190-U+21FF),
+        # which is commonly used in generated text ("A -> B") but was missing
+        # from EMOJI_RE's ranges, so it fell through to the body font (which
+        # lacks the glyph) and rendered as a tofu box.
+        self.assertTrue(main.EMOJI_RE.search("→"))
+
+    def test_wrap_emojis_skips_a_registered_font_that_lacks_the_glyph(self):
+        # Noto Emoji is registered first (it covers most pictographs) but
+        # doesn't ship a glyph for plain arrows like →. Wrapping in it anyway
+        # just moves the tofu box into the embedded font instead of fixing
+        # it, so wrapping must fall through to the next font that actually
+        # has the glyph (Apple Symbols).
+        covers = {"MDEmoji": False, "MDEmojiSymbols": True}
+        with (
+            unittest.mock.patch.object(main, "_get_emoji_fonts", return_value=["MDEmoji", "MDEmojiSymbols"]),
+            unittest.mock.patch.object(main, "_font_covers", side_effect=lambda font, cp: covers[font]),
+        ):
+            wrapped = main._wrap_emojis("send → Aseel")
+        self.assertIn('<font name="MDEmojiSymbols">→</font>', wrapped)
+
+    def test_wrap_emojis_leaves_text_unwrapped_when_no_registered_font_covers_it(self):
+        with (
+            unittest.mock.patch.object(main, "_get_emoji_fonts", return_value=["MDEmoji"]),
+            unittest.mock.patch.object(main, "_font_covers", return_value=False),
+        ):
+            wrapped = main._wrap_emojis("send → Aseel")
+        self.assertEqual(wrapped, "send → Aseel")
 
 
 class Version(unittest.TestCase):
