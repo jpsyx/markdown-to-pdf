@@ -32,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.7.4"
+__version__ = "0.7.5"
 
 import argparse
 import html
@@ -902,6 +902,34 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
             firstLineIndent=0,
             spaceBefore=12,
             spaceAfter=6,
+            keepWithNext=True,
+        ),
+        "h5": ParagraphStyle(
+            "MDDeepHeading",
+            parent=base["Heading5"],
+            fontName=HEADING_FONT_BOLD,
+            fontSize=10.5 - s,
+            leading=13.5 - s,
+            textColor=chapter_color,
+            alignment=TA_LEFT,
+            leftIndent=0,
+            firstLineIndent=0,
+            spaceBefore=10,
+            spaceAfter=5,
+            keepWithNext=True,
+        ),
+        "h6": ParagraphStyle(
+            "MDDeepestHeading",
+            parent=base["Heading6"],
+            fontName=HEADING_FONT_BOLD,
+            fontSize=10 - s,
+            leading=13 - s,
+            textColor=BODY_COLOR,
+            alignment=TA_LEFT,
+            leftIndent=0,
+            firstLineIndent=0,
+            spaceBefore=9,
+            spaceAfter=4,
             keepWithNext=True,
         ),
         "body": ParagraphStyle(
@@ -2135,6 +2163,12 @@ def parse_markdown(
         elif image_match:
             flush_paragraph(paragraph_buffer, story, styles)
             story.append(local_image_block(image_match.group(2), _LINK_BASE_DIR))
+        elif stripped.startswith("###### "):
+            flush_paragraph(paragraph_buffer, story, styles)
+            story.append(paragraph(stripped[7:].strip(), styles["h6"]))
+        elif stripped.startswith("##### "):
+            flush_paragraph(paragraph_buffer, story, styles)
+            story.append(paragraph(stripped[6:].strip(), styles["h5"]))
         elif stripped.startswith("#### "):
             flush_paragraph(paragraph_buffer, story, styles)
             story.append(paragraph(stripped[5:].strip(), styles["h4"]))
