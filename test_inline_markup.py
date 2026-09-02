@@ -1155,5 +1155,48 @@ class LeadingEmojiHangsIntoTheMargin(unittest.TestCase):
         self.assertIs(hung, style)
 
 
+class DeepHeadings(unittest.TestCase):
+    """`#####` and `######` are valid CommonMark headings (h5/h6).
+
+    The heading chain stopped at `#### `, so a deeper heading matched nothing
+    and fell through to the paragraph buffer, printing its own hash marks as
+    literal body text. Agenda appendices nest five levels deep, so every
+    newsletter article title rendered as "##### 1. Title" instead of a heading.
+    """
+
+    def _story(self, md):
+        return main.parse_markdown(md)
+
+    def test_h5_is_a_heading_not_literal_text(self):
+        story = self._story("##### Article title")
+        texts = [f.text for f in story if hasattr(f, "text")]
+        self.assertTrue(texts, "no flowable produced")
+        self.assertNotIn("#####", " ".join(texts))
+        self.assertIn("Article title", " ".join(texts))
+
+    def test_h6_is_a_heading_not_literal_text(self):
+        story = self._story("###### Deepest")
+        texts = [f.text for f in story if hasattr(f, "text")]
+        self.assertNotIn("#", " ".join(texts))
+        self.assertIn("Deepest", " ".join(texts))
+
+    def test_h5_uses_its_own_style(self):
+        story = self._story("##### Five")
+        styles = [f.style.name for f in story if hasattr(f, "style")]
+        self.assertTrue(any("Heading" in n or "Minor" in n or "Deep" in n
+                            for n in styles), styles)
+
+    def test_h5_is_not_larger_than_h4(self):
+        s = main.make_styles()
+        self.assertLessEqual(s["h5"].fontSize, s["h4"].fontSize)
+        self.assertLessEqual(s["h6"].fontSize, s["h5"].fontSize)
+
+    def test_seven_hashes_is_not_a_heading(self):
+        # CommonMark caps ATX headings at six.
+        story = self._story("####### Not a heading")
+        texts = " ".join(f.text for f in story if hasattr(f, "text"))
+        self.assertIn("#######", texts)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
