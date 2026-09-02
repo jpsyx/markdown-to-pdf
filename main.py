@@ -32,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.7.3"
+__version__ = "0.7.4"
 
 import argparse
 import html
@@ -40,6 +40,7 @@ import io
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -391,9 +392,68 @@ def _try_register_emoji_font(path: Path, registered_name: str) -> bool:
     """Register `path` as `registered_name`. Returns True on success."""
     try:
         pdfmetrics.registerFont(TTFont(registered_name, str(path)))
-        return True
     except Exception:
         return False
+    _tighten_emoji_advances(registered_name)
+    return True
+
+
+def _emoji_ink_box(font_name: str, codepoint: int) -> tuple[float, float] | None:
+    """Return `(left_side_bearing, ink_width)` in em units for `codepoint` in
+    the registered font `font_name`, or None if the font has no outline for it.
+
+    Read straight from `hmtx` (advance, lsb) and the `glyf` entry's bounding
+    box, so it reflects where the ink actually sits inside the glyph cell
+    rather than assuming the advance is snug around it. A glyph with no
+    contours (a variation selector, say) reports a zero-width box.
+    """
+    try:
+        face = pdfmetrics.getFont(font_name).face
+        glyph = face.charToGlyph.get(codepoint)
+        if glyph is None or glyph >= len(face.hmetrics):
+            return None
+        upem = float(face.unitsPerEm)
+        _advance, lsb = face.hmetrics[glyph]
+
+        start, end = face.glyphPos[glyph], face.glyphPos[glyph + 1]
+        if end - start < 10:
+            # Empty glyph: no contours, no ink, no box.
+            return (0.0, 0.0)
+        # glyf entry header: numberOfContours, xMin, yMin, xMax, yMax (int16).
+        glyf = face.get_table("glyf")
+        x_min = struct.unpack(">h", glyf[start + 2 : start + 4])[0]
+        x_max = struct.unpack(">h", glyf[start + 6 : start + 8])[0]
+        return (lsb / upem, max(0.0, (x_max - x_min) / upem))
+    except Exception:
+        return None
+
+
+def _tighten_emoji_advances(font_name: str) -> None:
+    """Shrink each emoji glyph's advance so it ends where its ink ends.
+
+    Noto Emoji is monospaced at 1.27em (2600/2048 units) for every glyph while
+    drawing only ~1.0em of ink, and narrow glyphs draw far less than that — the
+    ink of `❗` is barely a fifth of an em. Left verbatim, that surplus prints
+    as dead space between an emoji and the text after it: nearly a full em for
+    `❗`, which is what made emoji-led headings look broken. Retiming the
+    advance to `lsb + ink_width` leaves exactly the source markdown's own space
+    as separation. `charWidths` is in /1000-em units, and ReportLab builds the
+    embedded font's /W array from it, so layout and PDF stay consistent.
+    """
+    try:
+        face = pdfmetrics.getFont(font_name).face
+    except Exception:
+        return
+    for codepoint, width in list(face.charWidths.items()):
+        if not width:
+            continue  # Already zero-width (variation selectors); leave alone.
+        box = _emoji_ink_box(font_name, codepoint)
+        if box is None:
+            continue
+        lsb, ink = box
+        tightened = 1000.0 * (lsb + ink)
+        if 0 < tightened < width:
+            face.charWidths[codepoint] = tightened
 
 
 def _download_noto_emoji() -> bool:
@@ -956,8 +1016,39 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
     }
 
 
+def _hang_leading_emoji(text: str, style: ParagraphStyle) -> ParagraphStyle:
+    """Return `style` with the first line pulled left by a leading emoji's
+    left side bearing, so the glyph's ink lands flush on the margin.
+
+    Emoji glyphs are drawn centred in an oversized cell, so putting the glyph
+    origin on the margin leaves the ink sitting well inside it — 6.75pt for
+    `❗` at 15pt, which reads as a stray indent next to the plain headings
+    above and below it. Hanging the bearing into the margin is the same
+    treatment quotation marks get in book typography.
+
+    Returns `style` itself when there is nothing to correct, so plain text
+    keeps sharing one style object.
+    """
+    match = EMOJI_RE.match(text)
+    if not match:
+        return style
+    font = _font_for(ord(match.group(0)[0]))
+    if font is None:
+        return style
+    box = _emoji_ink_box(font, ord(match.group(0)[0]))
+    if box is None:
+        return style
+    lsb = box[0]
+    if lsb <= 0:
+        return style
+    return style.clone(
+        f"{style.name}-EmojiHang",
+        firstLineIndent=style.firstLineIndent - lsb * style.fontSize,
+    )
+
+
 def paragraph(text: str, style: ParagraphStyle) -> Paragraph:
-    return Paragraph(inline_markup(text), style)
+    return Paragraph(inline_markup(text), _hang_leading_emoji(text, style))
 
 
 def callout_box(lines: Iterable[str], style: ParagraphStyle) -> Table:

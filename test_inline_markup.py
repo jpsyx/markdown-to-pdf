@@ -1046,5 +1046,114 @@ class HighlightedCodeBlocks(unittest.TestCase):
         self.assertIn("<font color=", cell.text)
 
 
+class EmojiMetrics(unittest.TestCase):
+    """Noto Emoji is monospaced: every glyph advances 1.27em (2600/2048 units)
+    while drawing only ~1.0em of ink, and each glyph's ink is centred in that
+    oversized cell behind a large left side bearing. Rendered verbatim, an
+    emoji at the start of a heading pushes the heading off the left margin and
+    opens a gap of up to a full em before the words.
+    """
+
+    def setUp(self):
+        if not main._get_emoji_fonts():
+            self.skipTest("no emoji font available on this machine")
+
+    def test_emoji_ink_box_reports_left_bearing_and_ink_width(self):
+        # U+2757 HEAVY EXCLAMATION MARK ORNAMENT is the pathological case: a
+        # narrow bar of ink floating in the middle of the 1.27em cell, so its
+        # left side bearing is over half an em.
+        font = main._font_for(ord("❗"))
+        self.assertIsNotNone(font)
+        lsb, ink = main._emoji_ink_box(font, ord("❗"))
+        self.assertAlmostEqual(lsb, 0.522, places=2)
+        self.assertGreater(ink, 0)
+        # Ink must fit inside the cell it was drawn for.
+        self.assertLess(lsb + ink, 1.27)
+
+    def test_emoji_ink_box_is_none_for_a_glyphless_codepoint(self):
+        font = main._font_for(ord("❗"))
+        # 'A' is not in the emoji font's cmap, so there is no box to report.
+        self.assertIsNone(main._emoji_ink_box(font, ord("A")))
+
+    def test_emoji_advance_is_tightened_to_the_ink_extent(self):
+        # The registered font's advance must end where the ink ends, instead
+        # of running on for the font's uniform 1.27em. charWidths is in
+        # /1000-em units, so 1.27em reads as ~1269.5.
+        from reportlab.pdfbase import pdfmetrics
+
+        font = main._font_for(ord("✅"))
+        face = pdfmetrics.getFont(font).face
+        lsb, ink = main._emoji_ink_box(font, ord("✅"))
+        self.assertAlmostEqual(
+            face.charWidths[ord("✅")], 1000 * (lsb + ink), places=1
+        )
+        self.assertLess(face.charWidths[ord("✅")], 1269.0)
+
+    def test_zero_width_variation_selector_keeps_a_zero_advance(self):
+        from reportlab.pdfbase import pdfmetrics
+
+        font = main._font_for(ord("✅"))
+        face = pdfmetrics.getFont(font).face
+        # U+FE0F carries no ink; tightening must not hand it a width.
+        if 0xFE0F in face.charWidths:
+            self.assertEqual(face.charWidths[0xFE0F], 0)
+
+
+class LeadingEmojiHangsIntoTheMargin(unittest.TestCase):
+    """A heading that starts with an emoji must align with a plain heading.
+
+    The emoji's ink sits `lsb` in from the glyph origin, so placing the origin
+    at the margin leaves the heading visibly indented (6.75pt for `❗` at
+    15pt). Compensating with a negative firstLineIndent hangs the bearing into
+    the margin so the ink itself lands flush.
+    """
+
+    def setUp(self):
+        if not main._get_emoji_fonts():
+            self.skipTest("no emoji font available on this machine")
+        self.styles = main.make_styles()
+
+    def test_plain_heading_keeps_its_first_line_indent(self):
+        style = main.make_styles()["h2"]
+        hung = main._hang_leading_emoji("Suggested order", style)
+        self.assertEqual(hung.firstLineIndent, style.firstLineIndent)
+        self.assertIs(hung, style)
+
+    def test_emoji_heading_gets_a_negative_first_line_indent(self):
+        style = self.styles["h2"]
+        hung = main._hang_leading_emoji("❗ MITs - if only these get done", style)
+        lsb, _ = main._emoji_ink_box(main._font_for(ord("❗")), ord("❗"))
+        self.assertAlmostEqual(
+            hung.firstLineIndent,
+            style.firstLineIndent - lsb * style.fontSize,
+            places=2,
+        )
+        self.assertLess(hung.firstLineIndent, 0)
+
+    def test_hang_is_proportional_to_the_heading_font_size(self):
+        h2 = self.styles["h2"]
+        h3 = self.styles["h3"]
+        self.assertGreater(h2.fontSize, h3.fontSize)
+        hung2 = main._hang_leading_emoji("🔥 Big", h2)
+        hung3 = main._hang_leading_emoji("🔥 Small", h3)
+        # Larger type needs a proportionally larger hang.
+        self.assertLess(hung2.firstLineIndent, hung3.firstLineIndent)
+
+    def test_paragraph_applies_the_hang_to_an_emoji_heading(self):
+        style = self.styles["h2"]
+        para = main.paragraph("✅ Completed today", style)
+        self.assertLess(para.style.firstLineIndent, 0)
+
+    def test_paragraph_leaves_a_plain_heading_untouched(self):
+        style = self.styles["h2"]
+        para = main.paragraph("Cut order if the day slips", style)
+        self.assertEqual(para.style.firstLineIndent, style.firstLineIndent)
+
+    def test_emoji_not_at_the_start_does_not_hang(self):
+        style = self.styles["h2"]
+        hung = main._hang_leading_emoji("Today is a win ❗", style)
+        self.assertIs(hung, style)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
