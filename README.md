@@ -53,6 +53,11 @@ whole page: a figure's printed size follows from its aspect ratio rather than
 from the pixel size mermaid happened to emit, which is what lets a diagram
 carry descriptive labels and stay legible.
 
+A diagram and its explanation are one figure and are never split across a page
+break. The italic paragraph after a fence is read as its caption, and a `Where:`
+glossary between the two joins the same figure, so the drawing is sized to the
+page minus whatever its explanation needs.
+
 Standalone local images are embedded in the PDF. Relative paths resolve from
 the Markdown file's directory, so `![Picker](assets/picker.png)` works from any
 current working directory. Images retain their aspect ratio and shrink to fit

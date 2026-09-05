@@ -17,6 +17,7 @@ import zlib
 from pathlib import Path
 
 import main
+from reportlab.platypus import KeepTogether, Paragraph
 
 
 class EmojiWrapping(unittest.TestCase):
@@ -1366,6 +1367,138 @@ class MermaidDiagramsFillTheTextBlock(unittest.TestCase):
         style = main.make_styles()["code"]
         table = main.code_block(["select 1;"], "sql", style)
         self.assertLessEqual(sum(table._colWidths), main.CONTENT_WIDTH + 0.01)
+
+
+
+class DiagramAndCaptionShareOnePage(unittest.TestCase):
+    """A figure is the diagram plus whatever explains it, and it must not split.
+
+    Scaling a diagram to the full content height pushed its caption and its
+    glossary onto the next page, so the reader had to flip back and forth to
+    read the labels against their definitions.
+    """
+
+    def _story(self, markdown):
+        return main.parse_markdown(markdown)
+
+    DIAGRAM = "```mermaid\nflowchart TD\n  a[\"alpha\"] --> b[\"beta\"]\n```"
+
+    def test_a_caption_paragraph_is_recognized(self):
+        story = self._story(f"{self.DIAGRAM}\n\n*What to notice here.*\n")
+        caption = story[-1]
+        self.assertTrue(main.is_diagram_caption(caption))
+
+    def test_ordinary_prose_is_not_a_caption(self):
+        story = self._story(f"{self.DIAGRAM}\n\nOrdinary prose follows.\n")
+        self.assertFalse(main.is_diagram_caption(story[-1]))
+
+    def test_a_diagram_and_its_caption_become_one_unit(self):
+        story = main.group_diagram_figures(
+            self._story(f"{self.DIAGRAM}\n\n*What to notice here.*\n"),
+            main.make_styles(),
+        )
+        self.assertEqual(len(story), 1)
+        self.assertIsInstance(story[0], KeepTogether)
+
+    def test_the_glossary_between_them_joins_the_unit(self):
+        markdown = (
+            f"{self.DIAGRAM}\n\nWhere:\n\n"
+            "- **alpha** - the first thing.\n"
+            "- **beta** - the second thing.\n\n"
+            "*What to notice here.*\n"
+        )
+        story = main.group_diagram_figures(self._story(markdown), main.make_styles())
+        self.assertEqual(len(story), 1)
+        self.assertIsInstance(story[0], KeepTogether)
+        self.assertEqual(len(story[0]._content), 4)
+
+    def test_prose_after_the_caption_stays_outside_the_unit(self):
+        markdown = f"{self.DIAGRAM}\n\n*What to notice.*\n\nUnrelated prose.\n"
+        story = main.group_diagram_figures(self._story(markdown), main.make_styles())
+        self.assertEqual(len(story), 2)
+        self.assertIsInstance(story[0], KeepTogether)
+        self.assertNotIsInstance(story[1], KeepTogether)
+
+    def test_a_diagram_with_no_caption_is_left_alone(self):
+        markdown = f"{self.DIAGRAM}\n\nOrdinary prose follows.\n"
+        story = main.group_diagram_figures(self._story(markdown), main.make_styles())
+        self.assertEqual(len(story), 2)
+        self.assertNotIsInstance(story[0], KeepTogether)
+
+    def test_a_heading_stops_the_search(self):
+        markdown = f"{self.DIAGRAM}\n\n## A heading\n\n*Not this diagram's caption.*\n"
+        story = main.group_diagram_figures(self._story(markdown), main.make_styles())
+        for flowable in story:
+            self.assertNotIsInstance(flowable, KeepTogether)
+
+    def test_the_whole_figure_fits_one_page(self):
+        markdown = (
+            f"{self.DIAGRAM}\n\nWhere:\n\n"
+            + "".join(f"- **term {n}** - a definition long enough to wrap onto a second line of body text.\n" for n in range(6))
+            + "\n*A caption that itself runs to several lines so the reserved height is not trivial, "
+            "and which therefore has to be measured rather than guessed at.*\n"
+        )
+        story = main.group_diagram_figures(self._story(markdown), main.make_styles())
+        self.assertEqual(len(story), 1)
+        # KeepTogether cannot be wrapped outside a build, so measure what it holds.
+        height = main._measure(story[0]._content)
+        # Strictly under, by the slack: a group that needs the entire page can
+        # only be placed on a completely empty one, and KeepTogether gives up
+        # and splits rather than emitting a blank page first.
+        self.assertLessEqual(height, main.CONTENT_HEIGHT - main.FIGURE_SLACK + 0.5)
+
+    def test_the_diagram_keeps_a_usable_share_of_the_page(self):
+        # The reservation must not crush the drawing: past a floor the caption
+        # is shrunk instead.
+        markdown = (
+            f"{self.DIAGRAM}\n\nWhere:\n\n"
+            + "".join(f"- **term {n}** - a definition long enough to wrap onto a second line of body text.\n" for n in range(14))
+            + "\n*A caption.*\n"
+        )
+        story = main.group_diagram_figures(self._story(markdown), main.make_styles())
+        image = story[0]._content[0]
+        self.assertGreaterEqual(image.drawHeight, main.MIN_DIAGRAM_HEIGHT_FRACTION * main.CONTENT_HEIGHT)
+
+    def test_a_glossary_list_is_measured_not_treated_as_free(self):
+        # ListFlowable.wrap() raises without a canvas. Swallowing that made a
+        # glossary cost nothing, so the reservation was far too small and
+        # KeepTogether gave up and split the figure anyway.
+        markdown = (
+            f"{self.DIAGRAM}\n\nWhere:\n\n"
+            + "".join(f"- **term {n}** - a definition long enough to wrap onto a second line of body text.\n" for n in range(6))
+            + "\n*A caption.*\n"
+        )
+        story = self._story(markdown)
+        glossary = [f for f in story if isinstance(f, main.ListFlowable)]
+        self.assertEqual(len(glossary), 1)
+        self.assertGreater(main._measure(glossary), 60.0)
+
+    def test_an_unmeasurable_flowable_is_treated_as_expensive(self):
+        class Unmeasurable(main.Flowable):
+            def wrap(self, *args):
+                raise RuntimeError("no canvas")
+
+        # Erring high gives the drawing less room; erring low overflows the page.
+        self.assertGreater(main._measure([Unmeasurable()]), 0.0)
+
+    def test_shrinking_a_caption_does_not_shrink_the_body_style(self):
+        # MDBody is one shared ParagraphStyle object. Mutating it in place to
+        # squeeze one caption would shrink every paragraph in the document.
+        styles = main.make_styles()
+        before = styles["body"].fontSize
+        caption = Paragraph("<i>A caption.</i>", styles["body"])
+        tall = caption.wrap(120.0, main.CONTENT_HEIGHT)[1]
+        shrunk = main._shrink_caption([caption], 0.5)
+        self.assertEqual(styles["body"].fontSize, before)
+        self.assertLess(shrunk[0].style.fontSize, before)
+        # The smaller type must actually take less room, which it only does if
+        # the paragraph was rebuilt rather than having its style swapped.
+        self.assertLess(shrunk[0].wrap(120.0, main.CONTENT_HEIGHT)[1], tall)
+
+    def test_a_reserved_height_shrinks_the_diagram(self):
+        tall = main.mermaid_fit(200.0, 100.0)
+        short = main.mermaid_fit(200.0, 100.0, reserved_height=300.0)
+        self.assertLessEqual(short, tall)
 
 
 

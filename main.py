@@ -32,12 +32,13 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 import argparse
 import html
 import io
 import os
+import copy
 import re
 import shutil
 import struct
@@ -1556,7 +1557,7 @@ def render_mermaid(source: str) -> ImageReader | None:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def mermaid_fit(width: float, height: float) -> float:
+def mermaid_fit(width: float, height: float, reserved_height: float = 0.0) -> float:
     """Scale that makes a diagram as large as the page allows.
 
     Deliberately NOT capped at 1.0. A diagram is a figure, not a screenshot:
@@ -1565,10 +1566,15 @@ def mermaid_fit(width: float, height: float) -> float:
     the text block makes the printed size a property of the diagram's aspect
     ratio alone, which is the thing an author can actually control, and it is
     what lets a diagram carry descriptive labels and take a whole page.
+
+    `reserved_height` is the space its caption and glossary need. A figure is
+    the drawing plus whatever explains it, so the drawing gets the page minus
+    that, never the whole page.
     """
     if width <= 0 or height <= 0:
         return 1.0
-    return min(CONTENT_WIDTH / width, CONTENT_HEIGHT / height)
+    available = max(CONTENT_HEIGHT - reserved_height, 1.0)
+    return min(CONTENT_WIDTH / width, available / height)
 
 
 def mermaid_block(
@@ -1601,7 +1607,186 @@ def mermaid_block(
     diagram.hAlign = "LEFT"
     diagram.spaceBefore = 6
     diagram.spaceAfter = 12
+    # `group_diagram_figures` re-fits this once it knows how much room the
+    # caption and glossary need, which is not knowable here.
+    diagram._mermaid_natural_size = (width, height)
     return diagram
+
+
+# A figure is the diagram plus whatever explains it: the caption, and the
+# glossary a diagram with abbreviated labels has to carry. Splitting those
+# across a page break makes the reader hold labels in their head while they
+# turn the page to find the definitions, which is exactly what the glossary
+# exists to avoid.
+#
+# The drawing therefore gets the page MINUS its explanation, and the whole
+# group is kept on one page. Past a floor the explanation is shrunk instead of
+# the drawing, because a diagram scaled below roughly a third of the page stops
+# being readable and a caption at 8pt does not.
+MIN_DIAGRAM_HEIGHT_FRACTION = 0.34
+MIN_CAPTION_FONT_SIZE = 7.0
+
+# Room left below a figure. A group that needs the entire content height can
+# only be placed on a completely empty page, and ReportLab's KeepTogether
+# answers that by giving up and splitting rather than by emitting a blank page
+# first. The slack also absorbs the small amount `_measure` cannot see, such as
+# a paragraph's last-line leading.
+FIGURE_SLACK = 18.0
+
+# How far past the diagram to look for its explanation. Long enough for a
+# "Where:" lead-in, a glossary list, and the caption; short enough that a
+# diagram with no caption cannot swallow the section that follows it.
+_FIGURE_LOOKAHEAD = 4
+
+_CAPTION_RE = re.compile(r"^<i>.*</i>$", re.S)
+
+
+def is_diagram_caption(flowable: Flowable) -> bool:
+    """Whether a flowable is a figure caption: one wholly italic body line."""
+    if not isinstance(flowable, Paragraph):
+        return False
+    if getattr(flowable.style, "name", "") != "MDBody":
+        return False
+    return bool(_CAPTION_RE.match(str(getattr(flowable, "text", "")).strip()))
+
+
+def _may_explain_a_diagram(flowable: Flowable) -> bool:
+    """Whether a flowable could be part of a figure's explanation."""
+    if isinstance(flowable, ListFlowable):
+        return True
+    if isinstance(flowable, Paragraph):
+        return getattr(flowable.style, "name", "") == "MDBody"
+    return False
+
+
+# What to assume a flowable costs when it cannot be measured. Deliberately not
+# zero: under-reserving overflows the page and splits the figure, which is the
+# defect this whole pass exists to prevent, while over-reserving only makes the
+# drawing a little smaller.
+_UNMEASURABLE_HEIGHT = 60.0
+
+
+def _flowable_height(flowable: Flowable, width: float) -> float:
+    """Height one flowable needs at `width`, without a canvas.
+
+    A `ListFlowable` is summed from its items rather than wrapped: its own
+    `wrap` reaches for `self.canv`, which does not exist until the document is
+    building, and swallowing that made a glossary cost nothing.
+    """
+    if isinstance(flowable, ListFlowable):
+        indent = getattr(flowable, "_leftIndent", None) or 18.0
+        inner = max(width - indent, 1.0)
+        total = 0.0
+        for item in getattr(flowable, "_content", []):
+            for child in getattr(item, "_flowables", None) or [item]:
+                total += _flowable_height(child, inner)
+        return total
+    try:
+        _width, height = flowable.wrap(width, CONTENT_HEIGHT)
+        return height
+    except Exception:
+        return _UNMEASURABLE_HEIGHT
+
+
+def _measure(flowables: list[Flowable]) -> float:
+    """Total height these flowables need at the full content width."""
+    return sum(
+        _flowable_height(flowable, CONTENT_WIDTH)
+        + getattr(flowable, "spaceBefore", 0)
+        + getattr(flowable, "spaceAfter", 0)
+        for flowable in flowables
+    )
+
+
+def _shrink_caption(flowables: list[Flowable], scale: float) -> list[Flowable]:
+    """The explanation with its type scaled down, bounded by legibility.
+
+    Returns new flowables rather than mutating. Two reasons, both of which bit:
+    `MDBody` is a single shared ParagraphStyle object, so squeezing one caption
+    in place would shrink every paragraph in the document; and a Paragraph
+    parses its text against its style at construction, so swapping `.style`
+    afterwards changes the reported size without changing the layout.
+
+    Anything that is not a Paragraph is returned untouched. The caller's floor
+    then simply is not reached, which costs a page break rather than
+    correctness.
+    """
+    rebuilt: list[Flowable] = []
+    for flowable in flowables:
+        style = getattr(flowable, "style", None)
+        if not isinstance(flowable, Paragraph) or style is None:
+            rebuilt.append(flowable)
+            continue
+        size = max(MIN_CAPTION_FONT_SIZE, style.fontSize * scale)
+        shrunk = copy.deepcopy(style)
+        shrunk.name = f"{style.name}Figure"
+        shrunk.leading = style.leading * (size / style.fontSize)
+        shrunk.fontSize = size
+        rebuilt.append(Paragraph(flowable.text, shrunk))
+    return rebuilt
+
+
+def group_diagram_figures(
+    story: list[Flowable], styles: dict[str, ParagraphStyle]
+) -> list[Flowable]:
+    """Bind every mermaid diagram to its explanation and keep the two together.
+
+    Runs over the finished story rather than inside the parser, because the
+    height a caption needs can only be measured once it is a flowable.
+    """
+    grouped: list[Flowable] = []
+    index = 0
+    while index < len(story):
+        flowable = story[index]
+        natural = getattr(flowable, "_mermaid_natural_size", None)
+        if natural is None:
+            grouped.append(flowable)
+            index += 1
+            continue
+
+        # Collect forward to the caption. A heading, a table, or another
+        # diagram ends the search, and so does running out of lookahead.
+        explanation: list[Flowable] = []
+        cursor = index + 1
+        while cursor < len(story) and len(explanation) < _FIGURE_LOOKAHEAD:
+            candidate = story[cursor]
+            if not _may_explain_a_diagram(candidate):
+                explanation = []
+                break
+            explanation.append(candidate)
+            cursor += 1
+            if is_diagram_caption(candidate):
+                break
+        else:
+            explanation = []
+        if explanation and not is_diagram_caption(explanation[-1]):
+            explanation = []
+
+        if not explanation:
+            grouped.append(flowable)
+            index += 1
+            continue
+
+        width, height = natural
+        # The drawing's own spacing is part of what the figure costs the page.
+        own_spacing = getattr(flowable, "spaceBefore", 0) + getattr(
+            flowable, "spaceAfter", 0
+        )
+        reserved = _measure(explanation) + own_spacing + FIGURE_SLACK
+        floor = MIN_DIAGRAM_HEIGHT_FRACTION * CONTENT_HEIGHT
+        if CONTENT_HEIGHT - reserved < floor:
+            # The explanation is what has to give. Shrink it enough to leave
+            # the drawing its floor, then re-measure.
+            room = max(CONTENT_HEIGHT - floor - own_spacing - FIGURE_SLACK, 1.0)
+            explanation = _shrink_caption(explanation, room / max(reserved, 1.0))
+            reserved = _measure(explanation) + own_spacing + FIGURE_SLACK
+        fit = mermaid_fit(width, height, reserved_height=reserved)
+        flowable.drawWidth = width * fit
+        flowable.drawHeight = height * fit
+
+        grouped.append(KeepTogether([flowable, *explanation]))
+        index = cursor
+    return grouped
 
 
 def _resolve_local_image_path(target: str, base_dir: str | None) -> Path:
@@ -2443,6 +2628,9 @@ def convert_markdown_to_pdf(
         agenda_tables=agenda_tables,
         black_text=black_text,
     )
+    # Bind every diagram to its caption and glossary before the document is
+    # paginated, so a figure and its explanation cannot land on facing pages.
+    story = group_diagram_figures(story, make_styles(font_shrink=font_shrink))
 
     doc = SimpleDocTemplate(
         str(output_path),

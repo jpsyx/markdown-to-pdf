@@ -89,6 +89,15 @@ absolute checkout path and can be run directly by anyone.
   decides the printed size. The whole path is optional by design: with no
   renderer the fence degrades to a plain code block carrying the diagram
   source, and the tool warns once on stderr.
+- **Figures** (`is_diagram_caption`, `_measure`, `_shrink_caption`,
+  `group_diagram_figures`): a pass over the finished story binds each diagram
+  to the explanation that follows it, up to and including its italic caption,
+  and wraps the group in `KeepTogether`. It runs after parsing because a
+  caption's height can only be measured once it is a flowable. The drawing is
+  re-fitted to the page minus that height, minus `FIGURE_SLACK`, since a group
+  needing the whole content height can never be placed. Past
+  `MIN_DIAGRAM_HEIGHT_FRACTION` the explanation is shrunk instead, by
+  rebuilding its paragraphs against a copied style.
 - **Code wrapping** (`code_columns`, `_segment_code_line`, `wrap_code_line`,
   `wrap_code_markup`): ReportLab's `Preformatted`/`XPreformatted` do not wrap,
   so a long line overflowed the frame and its tail was lost. Lines are broken
