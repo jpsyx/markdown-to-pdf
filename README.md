@@ -39,9 +39,19 @@ Shiki share:
 
 Those lines get a shaded background so prose can point at them. MDX proper (JSX
 inside Markdown) is not supported; only the highlight spec is read.
+
+A source line too wide for the page is wrapped rather than run off the right
+margin, breaking at a space where there is one and hard-cutting a long
+identifier where there is not. Continuations carry a `\u21b3` marker so a wrap is
+never mistaken for the source's own formatting, and a called-out line keeps its
+shading across every physical row it occupies.
+
 A ```mermaid fence is rendered as a diagram, which needs Node.js: `install.sh`
 provisions the renderer, and without it the fence prints its own source so
-nothing is lost.
+nothing is lost. A diagram is scaled to fill the text block, so it may take a
+whole page: a figure's printed size follows from its aspect ratio rather than
+from the pixel size mermaid happened to emit, which is what lets a diagram
+carry descriptive labels and stay legible.
 
 Standalone local images are embedded in the PDF. Relative paths resolve from
 the Markdown file's directory, so `![Picker](assets/picker.png)` works from any

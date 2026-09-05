@@ -32,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.7.5"
+__version__ = "0.8.0"
 
 import argparse
 import html
@@ -46,6 +46,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Iterable, Sequence
+from html import unescape
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -609,6 +610,14 @@ RIGHT_MARGIN = 56.2
 TOP_MARGIN = 51.8   # ReportLab frame padding plus title metrics yield sample y=56.3
 BOTTOM_MARGIN = 42.0
 FRAME_PADDING = 6.0  # ReportLab Frame default on every side
+
+# The area a flowable actually gets. ReportLab's Frame pads 6pt on every side
+# INSIDE the margins, so the raw margin box is 12pt wider and taller than the
+# space available. Sizing a figure or a table to the margin box overflows the
+# frame, and ReportLab answers that with a LayoutError rather than by shrinking
+# what it was given.
+CONTENT_WIDTH = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - (2 * FRAME_PADDING)
+CONTENT_HEIGHT = PAGE_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN - (2 * FRAME_PADDING)
 
 # Room a table cell keeps for its content once its padding is paid for. Below
 # roughly this, a cell cannot seat a single glyph and ReportLab raises rather
@@ -1212,6 +1221,146 @@ def highlight_to_xpre_lines(source: str, language: str) -> list[str]:
     return rendered
 
 
+# ReportLab's Preformatted and XPreformatted do not wrap: they lay a line out
+# at its natural width and let it overflow the frame. A long function signature
+# therefore printed past the right margin and its tail was lost off the page,
+# with nothing in the output to say so. Code is wrapped here instead, before it
+# reaches a flowable.
+#
+# A continuation is marked rather than merely indented, because an unmarked
+# wrap is indistinguishable from the source's own formatting and a reader with
+# a printout has no way to check. U+21B3 is present in the mono families this
+# tool registers.
+CODE_WRAP_MARKER = "\u21b3 "
+
+# Break after one of these rather than mid-identifier when there is a choice.
+_CODE_BREAK_AFTER = " \t,;:)]}>"
+
+# A tag is zero-width, an entity is one glyph, anything else is one character.
+_CODE_MARKUP_TOKEN_RE = re.compile(r"<[^>]*>|&[A-Za-z][A-Za-z0-9]*;|&#[0-9]+;|.", re.S)
+
+
+def code_columns(style: ParagraphStyle) -> int:
+    """How many monospace characters fit across a code block's text area."""
+    available = CONTENT_WIDTH - 20
+    per_character = pdfmetrics.stringWidth("M", style.fontName, style.fontSize)
+    if per_character <= 0:
+        return 80
+    return max(1, int(available // per_character))
+
+
+def _code_break_point(text: str, budget: int) -> int:
+    """Where to cut `text` so the piece is at most `budget` characters."""
+    limit = min(budget, len(text))
+    for index in range(limit, 0, -1):
+        if text[index - 1] in _CODE_BREAK_AFTER:
+            return index
+    return limit
+
+
+def _segment_code_line(
+    line: str, max_chars: int
+) -> tuple[str, list[tuple[int, int]]] | None:
+    """Indent plus visible-index ranges for one wrapped line, or None if it fits.
+
+    Shared by the plain and the syntax-highlighted paths so both break at
+    exactly the same places; only the rendering of each range differs.
+    """
+    if max_chars <= 0 or len(line) <= max_chars:
+        return None
+    indent = line[: len(line) - len(line.lstrip())]
+    first_budget = max_chars - len(indent)
+    rest_budget = max_chars - len(indent) - len(CODE_WRAP_MARKER)
+    if first_budget <= 0 or rest_budget <= 0:
+        return None
+    ranges: list[tuple[int, int]] = []
+    cursor = len(indent)
+    budget = first_budget
+    while cursor < len(line):
+        remaining = line[cursor:]
+        if len(remaining) <= budget:
+            ranges.append((cursor, len(line)))
+            break
+        cut = _code_break_point(remaining, budget)
+        ranges.append((cursor, cursor + cut))
+        cursor += cut
+        # Whitespace at a break belongs to the break, not to the next line.
+        while cursor < len(line) and line[cursor] in " \t":
+            cursor += 1
+        budget = rest_budget
+    return indent, ranges
+
+
+def wrap_code_line(line: str, max_chars: int) -> list[str]:
+    """One source line as the physical lines that fit the page."""
+    segmented = _segment_code_line(line, max_chars)
+    if segmented is None:
+        return [line]
+    indent, ranges = segmented
+    return [
+        (indent if index == 0 else indent + CODE_WRAP_MARKER) + line[start:end]
+        for index, (start, end) in enumerate(ranges)
+    ]
+
+
+def _code_markup_items(markup: str) -> list[tuple[str, str]]:
+    """(source, visible) pairs, where a tag contributes no visible text."""
+    items: list[tuple[str, str]] = []
+    for match in _CODE_MARKUP_TOKEN_RE.finditer(markup):
+        token = match.group(0)
+        if token.startswith("<"):
+            items.append((token, ""))
+        elif token.startswith("&"):
+            items.append((token, unescape(token) or "?"))
+        else:
+            items.append((token, token))
+    return items
+
+
+def wrap_code_markup(markup: str, max_chars: int) -> list[str]:
+    """One line of highlighted markup as the physical lines that fit the page.
+
+    Counting is done on visible characters, so a `<font>` span costs nothing
+    and `&lt;` costs one. A span left open at a break is closed and reopened,
+    so every emitted line is independently well formed.
+    """
+    items = _code_markup_items(markup)
+    visible = "".join(piece for _source, piece in items)
+    segmented = _segment_code_line(visible, max_chars)
+    if segmented is None:
+        return [markup]
+    indent, ranges = segmented
+
+    pieces: list[str] = []
+    open_tags: list[str] = []
+    position = 0
+    index = 0
+    for range_index, (start, end) in enumerate(ranges):
+        prefix = indent if range_index == 0 else indent + CODE_WRAP_MARKER
+        body = "".join(open_tags)
+        while index < len(items):
+            source, seen = items[index]
+            if not seen:
+                # A tag: it belongs to whichever line is open when it appears.
+                if source.startswith("</"):
+                    if open_tags:
+                        open_tags.pop()
+                else:
+                    open_tags.append(source)
+                body += source
+                index += 1
+                continue
+            if position >= end:
+                break
+            if position >= start:
+                body += source
+            position += len(seen)
+            index += 1
+        body += "".join("</font>" for _tag in open_tags)
+        pieces.append(prefix + body)
+    return pieces
+
+
 def _highlighted_code_table(
     lines: list[str],
     language: str,
@@ -1228,12 +1377,22 @@ def _highlighted_code_table(
         except Exception:
             markup = None
 
+    columns = code_columns(style)
     rows: list[list[Flowable]] = []
+    # Source line number -> the physical rows it occupies, so a highlight still
+    # covers the whole of a line that had to wrap.
+    row_span: dict[int, tuple[int, int]] = {}
     for index, line in enumerate(lines):
+        start_row = len(rows)
         if markup is not None and index < len(markup):
-            rows.append([XPreformatted(markup[index] or " ", style)])
+            for piece in wrap_code_markup(markup[index], columns):
+                rows.append([XPreformatted(piece or " ", style)])
         else:
-            rows.append([Preformatted(line or " ", style)])
+            for piece in wrap_code_line(line, columns):
+                rows.append([Preformatted(piece or " ", style)])
+        if len(rows) == start_row:
+            rows.append([Preformatted(" ", style)])
+        row_span[index + 1] = (start_row, len(rows) - 1)
 
     commands = [
         ("BACKGROUND", (0, 0), (-1, -1), CODE_FILL),
@@ -1243,9 +1402,12 @@ def _highlighted_code_table(
         ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
     ]
     for number in sorted(highlight_lines):
-        if 1 <= number <= len(rows):
-            row = number - 1
-            commands.append(("BACKGROUND", (0, row), (-1, row), CODE_HIGHLIGHT_FILL))
+        span = row_span.get(number)
+        if span is not None:
+            first, last = span
+            commands.append(
+                ("BACKGROUND", (0, first), (-1, last), CODE_HIGHLIGHT_FILL)
+            )
     # Breathing room at the block's edges only, so the lines stay on the
     # monospace grid in between.
     commands.append(("TOPPADDING", (0, 0), (-1, 0), 8))
@@ -1268,22 +1430,34 @@ def code_block(
     # source through Pygments to produce XPreformatted markup with per-token
     # <font color="..."> spans. Unknown languages fall back to plain rendering.
     text = "\n".join(lines)
+    columns = code_columns(style)
+
+    def _plain_cell() -> Flowable:
+        wrapped = [piece for line in lines for piece in wrap_code_line(line, columns)]
+        return Preformatted("\n".join(wrapped), style)
+
     cell: Flowable
     if language and _PYGMENTS_AVAILABLE and not black_text:
         try:
-            highlighted = highlight_to_xpre(text, language)
-            cell = XPreformatted(highlighted, style)
+            # Lex the ORIGINAL text, then wrap the resulting markup. Wrapping
+            # first would hand the lexer broken strings and identifiers.
+            wrapped = [
+                piece
+                for line_markup in highlight_to_xpre_lines(text, language)
+                for piece in wrap_code_markup(line_markup, columns)
+            ]
+            cell = XPreformatted("\n".join(wrapped), style)
         except ClassNotFound:
             # No lexer for this tag: render it as plain code rather than
             # failing, since the fence is still readable content.
-            cell = Preformatted(text, style)
+            cell = _plain_cell()
         except Exception:
             # A lexer that chokes on its input must not cost the whole
             # document. Same fallback, deliberately broad.
-            cell = Preformatted(text, style)
+            cell = _plain_cell()
     else:
-        cell = Preformatted(text, style)
-    width = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
+        cell = _plain_cell()
+    width = CONTENT_WIDTH
     if highlight_lines:
         # One row per line, so a called-out line can carry its own background
         # across the full block width. A single cell cannot: `backColor` on a
@@ -1316,6 +1490,13 @@ MERMAID_FENCE_LANGUAGES = ("mermaid",)
 # Render at 3x and scale down in the PDF, so the diagram stays sharp in print
 # instead of resampling a screen-resolution bitmap.
 MERMAID_SCALE = 3
+
+# mermaid lays a diagram out inside a viewport and shrinks the whole drawing,
+# type included, when it does not fit. At the 800px default a diagram with
+# descriptive labels is squashed before this tool ever sees it, and that shrink
+# then compounds with the fit-to-page scaling below. A wide viewport lets the
+# natural layout happen, so exactly one scaling decides the printed size.
+MERMAID_VIEWPORT_WIDTH = 2000
 MERMAID_TIMEOUT_SECONDS = 120
 
 
@@ -1360,6 +1541,7 @@ def render_mermaid(source: str) -> ImageReader | None:
                     "-o", str(png),
                     "-b", "white",
                     "-s", str(MERMAID_SCALE),
+                    "-w", str(MERMAID_VIEWPORT_WIDTH),
                 ],
                 check=True,
                 capture_output=True,
@@ -1372,6 +1554,21 @@ def render_mermaid(source: str) -> ImageReader | None:
         return ImageReader(io.BytesIO(png.read_bytes()))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def mermaid_fit(width: float, height: float) -> float:
+    """Scale that makes a diagram as large as the page allows.
+
+    Deliberately NOT capped at 1.0. A diagram is a figure, not a screenshot:
+    printing one at whatever pixel size mermaid happened to emit is what made
+    labels smaller than body text on one page and larger on the next. Filling
+    the text block makes the printed size a property of the diagram's aspect
+    ratio alone, which is the thing an author can actually control, and it is
+    what lets a diagram carry descriptive labels and take a whole page.
+    """
+    if width <= 0 or height <= 0:
+        return 1.0
+    return min(CONTENT_WIDTH / width, CONTENT_HEIGHT / height)
 
 
 def mermaid_block(
@@ -1397,11 +1594,7 @@ def mermaid_block(
     # fitting, or every diagram renders three times too large.
     width = native_width / MERMAID_SCALE
     height = native_height / MERMAID_SCALE
-    fit = min(
-        (PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN) / width,
-        (PAGE_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN) / height,
-        1.0,
-    )
+    fit = mermaid_fit(width, height)
     # `reader.fileName` is the in-memory buffer the reader wrapped; Image
     # takes any object with `.read`, and seeks it itself.
     diagram = Image(reader.fileName, width=width * fit, height=height * fit)
@@ -1438,15 +1631,9 @@ def local_image_block(target: str, base_dir: str | None = None) -> Image:
         native_width, native_height = reader.getSize()
     except (OSError, ValueError) as error:
         raise ValueError(f"Could not read image file: {image_path}") from error
-    frame_width = (
-        PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - (2 * FRAME_PADDING)
-    )
-    frame_height = (
-        PAGE_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN - (2 * FRAME_PADDING)
-    )
     fit = min(
-        frame_width / native_width,
-        frame_height / native_height,
+        CONTENT_WIDTH / native_width,
+        CONTENT_HEIGHT / native_height,
         1.0,
     )
     image = Image(

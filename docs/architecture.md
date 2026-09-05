@@ -79,12 +79,23 @@ absolute checkout path and can be run directly by anyone.
   `<span class=".*">` and therefore collapses everything between the first and
   last span on a line, silently deleting code (`const x: number = 1;` came back
   as `const ;`). An unknown language tag falls back to plain rendering.
-- **Mermaid** (`find_mermaid_renderer`, `render_mermaid`, `mermaid_block`): a
-  ```mermaid fence shells out to `mermaid-cli`, which needs a headless browser,
-  and embeds the resulting PNG. Rendering happens at `MERMAID_SCALE` and is
-  scaled back down so print stays sharp. The whole path is optional by design:
-  with no renderer the fence degrades to a plain code block carrying the
-  diagram source, and the tool warns once on stderr.
+- **Mermaid** (`find_mermaid_renderer`, `render_mermaid`, `mermaid_fit`,
+  `mermaid_block`): a ```mermaid fence shells out to `mermaid-cli`, which needs
+  a headless browser, and embeds the resulting PNG. Rendering happens at
+  `MERMAID_SCALE` and is scaled back down so print stays sharp, inside a
+  `MERMAID_VIEWPORT_WIDTH` viewport so mermaid does not pre-shrink a wide
+  diagram before this tool sees it. `mermaid_fit` then scales the result to the
+  content box and is deliberately NOT capped at 1.0, so exactly one scaling
+  decides the printed size. The whole path is optional by design: with no
+  renderer the fence degrades to a plain code block carrying the diagram
+  source, and the tool warns once on stderr.
+- **Code wrapping** (`code_columns`, `_segment_code_line`, `wrap_code_line`,
+  `wrap_code_markup`): ReportLab's `Preformatted`/`XPreformatted` do not wrap,
+  so a long line overflowed the frame and its tail was lost. Lines are broken
+  to `code_columns` before they reach a flowable. Highlighted code is lexed
+  first and its markup wrapped second, so the lexer never sees a split string;
+  `wrap_code_markup` counts visible characters only and closes and reopens any
+  span left open at a break.
 - **Local images** (`_resolve_local_image_path`, `local_image_block`): a
   standalone Markdown image resolves relative to the input file, rejects URI
   schemes, and becomes an `Image` flowable. The image keeps its aspect ratio,

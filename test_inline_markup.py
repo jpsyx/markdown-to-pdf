@@ -1198,5 +1198,176 @@ class DeepHeadings(unittest.TestCase):
         self.assertIn("#######", texts)
 
 
+class LongCodeLinesWrap(unittest.TestCase):
+    """A source line wider than the text block must wrap, not run off the page.
+
+    ReportLab's Preformatted/XPreformatted do not wrap: they lay the line out
+    at its natural width and let it overflow the frame, so a long function
+    signature printed past the right margin and its tail was simply lost.
+    """
+
+    def test_code_columns_matches_the_measured_text_block(self):
+        style = main.make_styles()["code"]
+        from reportlab.pdfbase import pdfmetrics
+        columns = main.code_columns(style)
+        width = pdfmetrics.stringWidth("M" * columns, style.fontName, style.fontSize)
+        available = main.CONTENT_WIDTH - 20
+        self.assertLessEqual(width, available)
+        over = pdfmetrics.stringWidth("M" * (columns + 1), style.fontName, style.fontSize)
+        self.assertGreater(over, available)
+
+    def test_a_short_line_is_returned_unchanged(self):
+        self.assertEqual(main.wrap_code_line("select 1;", 40), ["select 1;"])
+
+    def test_an_exactly_full_line_is_not_wrapped(self):
+        self.assertEqual(main.wrap_code_line("a" * 40, 40), ["a" * 40])
+
+    def test_a_long_line_breaks_into_pieces_within_the_budget(self):
+        line = "create or replace function public.util__is_workspace_member (p_workspace_id uuid) returns boolean"
+        pieces = main.wrap_code_line(line, 40)
+        self.assertGreater(len(pieces), 1)
+        for piece in pieces:
+            self.assertLessEqual(len(piece), 40)
+
+    def test_continuations_are_marked_so_a_wrap_is_not_read_as_source(self):
+        pieces = main.wrap_code_line("alpha beta gamma delta epsilon", 12)
+        self.assertFalse(pieces[0].lstrip().startswith(main.CODE_WRAP_MARKER))
+        for piece in pieces[1:]:
+            self.assertTrue(piece.lstrip().startswith(main.CODE_WRAP_MARKER))
+
+    def test_the_original_text_survives_the_wrap(self):
+        line = "  select id, workspace_id, owner_id from public.dashboards where id = $1"
+        pieces = main.wrap_code_line(line, 24)
+        rejoined = pieces[0] + "".join(
+            p.lstrip()[len(main.CODE_WRAP_MARKER):] for p in pieces[1:]
+        )
+        self.assertEqual(rejoined.split(), line.split())
+
+    def test_continuations_keep_the_original_indent(self):
+        pieces = main.wrap_code_line("        deeply indented and quite long here", 24)
+        self.assertGreater(len(pieces), 1)
+        for piece in pieces[1:]:
+            self.assertTrue(piece.startswith("        "))
+
+    def test_a_word_longer_than_the_budget_is_hard_cut(self):
+        pieces = main.wrap_code_line("x" * 100, 20)
+        for piece in pieces:
+            self.assertLessEqual(len(piece), 20)
+        self.assertEqual("".join(p.lstrip().removeprefix(main.CODE_WRAP_MARKER) for p in pieces), "x" * 100)
+
+    def test_markup_wrapping_counts_visible_characters_only(self):
+        markup = '<font color="#111111">select</font> <font color="#222222">something_long</font>'
+        pieces = main.wrap_code_markup(markup, 12)
+        self.assertGreater(len(pieces), 1)
+
+    def test_markup_wrapping_closes_and_reopens_the_open_span(self):
+        markup = '<font color="#111111">' + ("a" * 30) + "</font>"
+        pieces = main.wrap_code_markup(markup, 12)
+        for piece in pieces:
+            self.assertEqual(piece.count("<font"), piece.count("</font>"))
+
+    def test_markup_wrapping_treats_an_entity_as_one_character(self):
+        # &lt; is one visible glyph; counting its five source characters would
+        # wrap far too early.
+        markup = "&lt;" * 10
+        pieces = main.wrap_code_markup(markup, 10)
+        self.assertEqual(len(pieces), 1)
+
+    def test_a_long_line_in_a_rendered_block_is_broken_up(self):
+        from reportlab.pdfbase import pdfmetrics
+        style = main.make_styles()["code"]
+        long_line = "create or replace function public.util__is_workspace_member (p_workspace_id uuid, p_user_id uuid) returns boolean language sql security definer stable"
+        table = main.code_block([long_line], "sql", style)
+        cell = table._cellvalues[0][0]
+        rendered = re.sub(r"<[^>]*>", "", cell.text if hasattr(cell, "text") else "\n".join(cell.lines))
+        available = main.CONTENT_WIDTH - 20
+        physical = rendered.split("\n")
+        self.assertGreater(len(physical), 1)
+        for line in physical:
+            drawn = pdfmetrics.stringWidth(line, style.fontName, style.fontSize)
+            self.assertLessEqual(drawn, available)
+
+    def test_highlight_follows_a_line_that_wrapped(self):
+        style = main.make_styles()["code"]
+        lines = ["short one", "y" * 400, "short three"]
+        table = main.code_block(lines, "", style, highlight_lines=frozenset({3}))
+        # Line 3 is still highlighted even though line 2 became several rows.
+        backgrounds = [
+            command for command in table._bkgrndcmds if command[3] == main.CODE_HIGHLIGHT_FILL
+        ]
+        self.assertEqual(len(backgrounds), 1)
+        # The whole of source line 3 is covered: it is the last row, and it did
+        # not wrap, so first and last row of the span are the same.
+        first_row, last_row = backgrounds[0][1][1], backgrounds[0][2][1]
+        self.assertEqual(first_row, len(table._cellvalues) - 1)
+        self.assertEqual(last_row, len(table._cellvalues) - 1)
+        self.assertEqual(len(table._cellvalues), len(main.wrap_code_line("y" * 400, main.code_columns(style))) + 2)
+
+
+class MermaidDiagramsFillTheTextBlock(unittest.TestCase):
+    """A diagram is scaled to the page, not left at whatever size it rendered.
+
+    Capping the fit factor at 1.0 meant mermaid's own in-viewport shrink was
+    the last word on label size, so a diagram with verbose labels printed its
+    text far smaller than body text and could not be read.
+    """
+
+    def test_a_small_diagram_is_scaled_up_to_the_text_width(self):
+        scale = main.mermaid_fit(200.0, 100.0)
+        self.assertGreater(scale, 1.0)
+
+    def test_a_wide_diagram_is_scaled_down_to_the_text_width(self):
+        scale = main.mermaid_fit(4000.0, 100.0)
+        self.assertLess(scale, 1.0)
+
+    def test_a_tall_diagram_is_bounded_by_the_frame_height(self):
+        scale = main.mermaid_fit(200.0, 4000.0)
+        self.assertLessEqual(4000.0 * scale, main.CONTENT_HEIGHT + 0.5)
+
+    def test_the_fit_always_uses_the_full_width_when_height_allows(self):
+        self.assertAlmostEqual(
+            200.0 * main.mermaid_fit(200.0, 100.0), main.CONTENT_WIDTH, places=3
+        )
+
+    def test_the_renderer_is_given_a_wide_viewport(self):
+        # mermaid shrinks a diagram, type included, to fit its viewport. At the
+        # 800px default a diagram with descriptive labels arrives pre-squashed,
+        # and that shrink compounds with the fit-to-page scaling.
+        calls = []
+
+        def _fake_run(argv, **kwargs):
+            calls.append(argv)
+            raise OSError("stop after capturing argv")
+
+        with unittest.mock.patch.object(main, "find_mermaid_renderer", lambda: ["mmdc"]):
+            with unittest.mock.patch.object(main.subprocess, "run", _fake_run):
+                main.render_mermaid("flowchart TD\n  a --> b")
+        self.assertTrue(calls)
+        argv = calls[0]
+        self.assertIn("-w", argv)
+        self.assertGreaterEqual(int(argv[argv.index("-w") + 1]), 1600)
+
+    def test_the_content_box_subtracts_the_frame_padding(self):
+        # ReportLab's Frame pads 6pt on every side. Sizing a figure to the raw
+        # margin box overflows the frame by 12pt and ReportLab raises
+        # LayoutError rather than shrinking it.
+        self.assertAlmostEqual(
+            main.CONTENT_WIDTH,
+            main.PAGE_WIDTH - main.LEFT_MARGIN - main.RIGHT_MARGIN - 2 * main.FRAME_PADDING,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            main.CONTENT_HEIGHT,
+            main.PAGE_HEIGHT - main.TOP_MARGIN - main.BOTTOM_MARGIN - 2 * main.FRAME_PADDING,
+            places=6,
+        )
+
+    def test_a_code_block_never_exceeds_the_frame(self):
+        style = main.make_styles()["code"]
+        table = main.code_block(["select 1;"], "sql", style)
+        self.assertLessEqual(sum(table._colWidths), main.CONTENT_WIDTH + 0.01)
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
