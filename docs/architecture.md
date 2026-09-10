@@ -119,6 +119,14 @@ absolute checkout path and can be run directly by anyone.
   and prose columns get the room. The table always spans the full text block.
 - **Parser** (`parse_markdown`): the line-oriented state machine that walks the
   Markdown and dispatches to the block builders, flushing buffers at boundaries.
+- **Page numbers** (`page_number_text`, `draw_page_footer`, `NumberedCanvas`):
+  each page is stamped with its bare number in the bottom margin, under the
+  frame, so numbering costs no content height and changes no pagination. A
+  one-page document is left unnumbered, and that is what needs the second pass:
+  whether there is more than one page is only known once the whole story is
+  laid out, which is after page one has been drawn. `NumberedCanvas` therefore
+  holds each finished page as saved canvas state and replays them from
+  `save()`, adding the footer once the count is known.
 - **Output** (`resolve_output_path`, `versioned_path`, `_prompt_overwrite`,
   `convert_markdown_to_pdf`, `main`): resolve a file or directory output path
   (non-interactive mode writes a `-vN` variant

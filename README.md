@@ -64,6 +64,10 @@ current working directory. Images retain their aspect ratio and shrink to fit
 the page without being enlarged. Remote image URLs are rejected and never
 fetched.
 
+Pages are numbered, centred in the bottom margin. The footer sits below the
+text block, so numbering never pushes content around, and a document that fits
+on one page is left unnumbered.
+
 Markdown links remain clickable in the PDF and are rendered without underlines
 for print readability. Use `--black-text` when the entire document, including
 headings and links, should be pure black (`#000000`).

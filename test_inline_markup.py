@@ -1502,5 +1502,99 @@ class DiagramAndCaptionShareOnePage(unittest.TestCase):
 
 
 
+class _RecordingCanvas:
+    """Records only what the footer needs, so the drawing code can be tested
+    without a real page: a canvas here is a sink for two or three calls."""
+
+    def __init__(self):
+        self.strings = []
+        self.font = None
+        self.fill_color = None
+        self.state_depth = 0
+
+    def saveState(self):
+        self.state_depth += 1
+
+    def restoreState(self):
+        self.state_depth -= 1
+
+    def setFont(self, name, size):
+        self.font = (name, size)
+
+    def setFillColor(self, color):
+        self.fill_color = color
+
+    def drawCentredString(self, x, y, text):
+        self.strings.append((x, y, text))
+
+
+class PageNumbers(unittest.TestCase):
+    def test_the_footer_is_the_bare_page_number(self):
+        self.assertEqual(main.page_number_text(3, 12), "3")
+
+    def test_a_single_page_document_is_not_numbered(self):
+        # A "1" alone on a one-page document tells the reader nothing: there is
+        # no sequence to place it in. Numbering starts to earn its ink at two
+        # pages, so a one-page document gets no footer at all.
+        self.assertEqual(main.page_number_text(1, 1), "")
+
+    def test_nothing_is_drawn_when_there_is_no_number(self):
+        canvas = _RecordingCanvas()
+
+        main.draw_page_footer(canvas, 1, 1)
+
+        self.assertEqual(canvas.strings, [])
+
+    def test_the_footer_clears_the_text_frame(self):
+        # The footer is drawn inside the bottom margin, under the frame. If it
+        # reached into the frame it would sit on top of the last line of body
+        # text, because ReportLab lays flowables out with no knowledge of what
+        # a page callback draws afterwards.
+        self.assertGreater(main.FOOTER_BASELINE, 0)
+        self.assertLess(
+            main.FOOTER_BASELINE + main.FOOTER_FONT_SIZE, main.BOTTOM_MARGIN
+        )
+
+    def test_the_footer_is_centred_on_the_page(self):
+        canvas = _RecordingCanvas()
+
+        main.draw_page_footer(canvas, 2, 5)
+
+        self.assertEqual(
+            canvas.strings,
+            [(main.PAGE_WIDTH / 2.0, main.FOOTER_BASELINE, "2")],
+        )
+        self.assertEqual(canvas.font, (main.HEADING_FONT, main.FOOTER_FONT_SIZE))
+        # Drawing must not leak the footer's font and colour into the next
+        # page's flowables.
+        self.assertEqual(canvas.state_depth, 0)
+
+    def test_every_page_is_numbered_with_the_document_total(self):
+        # The total is only known once the whole story is laid out, so the
+        # footers are drawn in a second pass over the saved pages. This is the
+        # test that the second pass runs and sees every page.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            markdown_path = root / "long.md"
+            markdown_path.write_text(
+                "# Long\n\n" + ("Body text that fills the page.\n\n" * 200),
+                encoding="utf-8",
+            )
+            drawn = []
+
+            def record(canvas, page, total):
+                drawn.append((page, total))
+
+            with unittest.mock.patch.object(main, "draw_page_footer", record):
+                output_path = main.convert_markdown_to_pdf(
+                    markdown_path, root / "long.pdf"
+                )
+
+            self.assertTrue(output_path.is_file())
+            self.assertGreater(len(drawn), 1)
+            total = len(drawn)
+            self.assertEqual(drawn, [(n + 1, total) for n in range(total)])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

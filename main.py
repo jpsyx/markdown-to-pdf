@@ -32,7 +32,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 import argparse
 import html
@@ -57,6 +57,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
     Flowable,
     KeepTogether,
@@ -624,6 +625,16 @@ CONTENT_HEIGHT = PAGE_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN - (2 * FRAME_PADDING)
 # roughly this, a cell cannot seat a single glyph and ReportLab raises rather
 # than clipping, so it is a floor on column width and not a style choice.
 MIN_CELL_CONTENT_WIDTH = 6.0
+
+# The page-number footer is drawn into the bottom margin, under the frame, so
+# it costs no content height and no existing pagination changes because of it.
+# Its baseline must therefore clear the frame: FOOTER_BASELINE plus the type's
+# height stays below BOTTOM_MARGIN, or the number would print over the last
+# line of body text, which ReportLab lays out with no knowledge of what a page
+# callback draws afterwards.
+FOOTER_FONT_SIZE = 8.5
+FOOTER_BASELINE = 24.0
+FOOTER_COLOR = colors.HexColor("#6B7280")
 
 
 def versioned_path(path: Path) -> Path:
@@ -2595,6 +2606,64 @@ def resolve_output_path(markdown_path: Path, output_path: Path | None) -> Path:
     return output_path
 
 
+def page_number_text(page: int, total: int) -> str:
+    """The footer's wording, kept pure so it is testable without a canvas.
+
+    A one-page document gets an empty string: a bare "1" with nothing to
+    follow it places the reader in a sequence that does not exist.
+    """
+    if total < 2:
+        return ""
+    return str(page)
+
+
+def draw_page_footer(canvas: Canvas, page: int, total: int) -> None:
+    """Stamp one page's number into the bottom margin, centred.
+
+    Draws nothing when there is no number to print, so a one-page document
+    keeps a clean bottom margin.
+    """
+    text = page_number_text(page, total)
+    if not text:
+        return
+    canvas.saveState()
+    canvas.setFont(HEADING_FONT, FOOTER_FONT_SIZE)
+    canvas.setFillColor(FOOTER_COLOR)
+    canvas.drawCentredString(PAGE_WIDTH / 2.0, FOOTER_BASELINE, text)
+    # The footer's font and colour must not leak into the next page's content.
+    canvas.restoreState()
+
+
+class NumberedCanvas(Canvas):
+    """A canvas that stamps its number on every page of a multi-page document.
+
+    The number itself needs no second pass, but the decision to print it does:
+    whether the document has more than one page is only known once the whole
+    story has been laid out, which is after page one has already been drawn.
+    So every finished page is held as saved canvas state, and `save()` replays
+    them, adding the footer now that the count is known. This is ReportLab's
+    own recipe for the problem; the cost is holding the pages in memory until
+    the document is written.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_pages: list[dict] = []
+
+    def showPage(self):
+        # Hold the page instead of emitting it: it has no footer yet.
+        self._saved_pages.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        total = len(self._saved_pages)
+        for number, state in enumerate(self._saved_pages, start=1):
+            self.__dict__.update(state)
+            draw_page_footer(self, number, total)
+            super().showPage()
+        super().save()
+
+
 def convert_markdown_to_pdf(
     markdown_path: Path,
     output_path: Path | None = None,
@@ -2642,7 +2711,7 @@ def convert_markdown_to_pdf(
         title=output_path.stem,
         author="markdown-to-pdf",
     )
-    doc.build(story)
+    doc.build(story, canvasmaker=NumberedCanvas)
     return output_path
 
 
