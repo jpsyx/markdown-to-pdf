@@ -16,6 +16,14 @@ run.sh <file.md> [--out <path>]
 
 ## Entry point (`run.sh`)
 
+`install.sh` provisions or repairs the private Python environment, installs the
+runtime requirements, and optionally provisions Mermaid and its browser. It
+publishes one executable launcher atomically in `BIN_DIR` (default
+`$HOME/.local/bin`), named `markdown-to-pdf` unless `--name <command>` selects
+another filename. Reinstalling the same name replaces it. Argument validation
+and help happen before installation. The launcher forwards arguments to
+`run.sh` and explains how to reinstall if that checkout has moved.
+
 A stable, name-frozen entry point. It resolves its own directory via
 `BASH_SOURCE` and execs `python3 main.py "$@"`, so it works regardless of the
 absolute checkout path and can be run directly by anyone.
@@ -133,6 +141,13 @@ absolute checkout path and can be run directly by anyone.
   rather than overwriting), build the document, and handle CLI arguments.
 
 ## Testing
+
+`python3 -m unittest test_install -v` checks named/repeated installation,
+side-effect-free help and invalid arguments, real virtualenv repair and Python
+dependency installation, optional Mermaid provisioning with a failed browser
+download, conversion without Node, and the moved-checkout diagnostic. These
+checks use isolated output directories and preserve the existing rendering
+suite below.
 
 `test_inline_markup.py` (stdlib `unittest`) pins the inline-markup behavior —
 the emphasis rules, underscore-in-identifiers literals, and code-span

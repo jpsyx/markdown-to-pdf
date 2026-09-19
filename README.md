@@ -74,7 +74,10 @@ headings and links, should be pure black (`#000000`).
 
 Set `BIN_DIR` to install somewhere else (`BIN_DIR=/usr/local/bin ./install.sh`).
 If the chosen directory isn't on your `$PATH`, the installer says so and prints
-the line to add.
+the line to add. Use `./install.sh --name md-pdf-dev` to choose another command
+filename. Repeating the same name replaces that launcher in place. Installer
+help exits before tool checks or writes; unknown arguments, missing names, and
+names containing paths are rejected before installation.
 
 **Keep the clone.** The converter and its virtualenv live there; the launcher
 points at them. If you move the clone, re-run `./install.sh` from its new

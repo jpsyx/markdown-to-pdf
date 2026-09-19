@@ -1,61 +1,54 @@
 #!/usr/bin/env bash
-# Install `markdown-to-pdf` onto $PATH as a real executable.
-#
-# Creates (or repairs) a private virtualenv beside this script, installs the
-# runtime dependencies into it, and writes a small launcher at
-# $BIN_DIR/markdown-to-pdf that runs the converter with that interpreter — so
-# the tool is a real command reachable by any shell, script, or tool, not just
-# an interactive shell.
-#
-# Re-running refreshes the virtualenv and OVERWRITES the launcher in place, so
-# this doubles as the updater and never leaves a second copy behind. Safe to run
-# directly from a clone; it resolves its own directory and hardcodes no
-# machine-specific path.
+# Install or update the command from this checkout.
 set -euo pipefail
 
 usage() {
-  cat <<'EOF'
-install.sh — install markdown-to-pdf onto $PATH as a real executable.
+  printf '%s\n' 'Install or update markdown-to-pdf as an executable command.
 
-Usage:
-  ./install.sh [--help]
+Usage: ./install.sh [--name <command>] [-h|--help]
 
 Options:
-  -h, --help   Print this help and exit.
+  --name <command>  Command filename (default: markdown-to-pdf).
+  -h, --help        Show this help without installing anything.
 
 Environment:
-  BIN_DIR      Directory to install the `markdown-to-pdf` launcher into.
-               Created if missing. Default: $HOME/.local/bin.
+  BIN_DIR          Installation directory (default: $HOME/.local/bin).
 
 Examples:
-  ./install.sh                      # install to ~/.local/bin/markdown-to-pdf
-  BIN_DIR=/usr/local/bin ./install.sh   # install elsewhere on $PATH
-  ./install.sh && markdown-to-pdf chapter.md   # install, then convert a file
-EOF
+  ./install.sh
+  BIN_DIR="$HOME/bin" ./install.sh --name markdown-to-pdf-dev'
 }
 
-case "${1:-}" in
-  -h | --help)
-    usage
-    exit 0
-    ;;
-  "") ;;
-  *)
-    usage >&2
-    exit 1
-    ;;
+for arg in "$@"; do
+  case "$arg" in -h|--help) usage; exit 0 ;; esac
+done
+
+command_name="markdown-to-pdf"
+while (($#)); do
+  case "$1" in
+    --name)
+      if (($# < 2)); then usage >&2; exit 2; fi
+      command_name="$2"
+      shift 2
+      ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+case "$command_name" in
+  ''|[.-]*|*..*|*[!a-zA-Z0-9_.-]*) usage >&2; exit 2 ;;
 esac
+if ((${#command_name} > 100)); then usage >&2; exit 2; fi
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-
-# Where to install the launcher. Callers may pass BIN_DIR; otherwise default to
-# the conventional user bin dir. Resolved to an absolute path so the $PATH check
-# below compares like with like.
-BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
-mkdir -p "$BIN_DIR"
-BIN_DIR="$(cd -- "$BIN_DIR" && pwd)"
-
-VENV="$SCRIPT_DIR/.venv"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+bin_dir="${BIN_DIR:-$HOME/.local/bin}"
+mkdir -p -- "$bin_dir"
+bin_dir="$(cd -- "$bin_dir" && pwd)"
+destination="$bin_dir/$command_name"
+if [[ -d "$destination" ]]; then
+  printf 'Cannot replace directory: %s\n' "$destination" >&2
+  exit 1
+fi
+VENV="$script_dir/.venv"
 PY="$VENV/bin/python"
 
 # A virtualenv is bound to the interpreter it was built from, so an upgraded,
@@ -79,7 +72,7 @@ fi
 # Needs network the first time (and whenever requirements.txt changes); pip
 # resolves offline once everything is already satisfied.
 echo "Installing dependencies…" >&2
-"$PY" -m pip install --quiet --disable-pip-version-check -r "$SCRIPT_DIR/requirements.txt" >&2
+"$PY" -m pip install --quiet --disable-pip-version-check -r "$script_dir/requirements.txt" >&2
 "$PY" -c 'import reportlab' || {
   echo "error: dependencies did not install correctly into $VENV" >&2
   exit 1
@@ -92,17 +85,17 @@ echo "Installing dependencies…" >&2
 # this clone plus puppeteer's shared cache; nothing is installed globally.
 if command -v npm >/dev/null 2>&1; then
   echo "Installing the mermaid renderer…" >&2
-  if npm install --prefix "$SCRIPT_DIR" >&2; then
+  if npm install --prefix "$script_dir" >&2; then
     # puppeteer's own postinstall is commonly blocked by npm's allowScripts
     # policy, which leaves mermaid-cli with no browser to drive. Asking for the
     # browser explicitly works either way and overrides no security setting.
-    if ! "$SCRIPT_DIR/node_modules/.bin/mmdc" --version >/dev/null 2>&1; then
+    if ! "$script_dir/node_modules/.bin/mmdc" --version >/dev/null 2>&1; then
       echo "note: mermaid-cli installed but not runnable yet" >&2
     fi
-    npx --prefix "$SCRIPT_DIR" puppeteer browsers install chrome-headless-shell >&2 || {
+    npx --prefix "$script_dir" puppeteer browsers install chrome-headless-shell >&2 || {
       echo "note: could not fetch the headless browser mermaid needs." >&2
       echo "      Diagrams will print as source until this succeeds:" >&2
-      echo "        cd $SCRIPT_DIR && npx puppeteer browsers install chrome-headless-shell" >&2
+      echo "        cd $script_dir && npx puppeteer browsers install chrome-headless-shell" >&2
     }
   else
     echo "note: 'npm install' failed; mermaid diagrams will print as source." >&2
@@ -113,36 +106,31 @@ else
   echo "      Install Node.js (https://nodejs.org), then re-run ./install.sh." >&2
 fi
 
-# Fixed filename, so each run overwrites the previous launcher instead of adding
-# another one. It execs run.sh, which keeps the CLI defined in exactly one place
-# and picks up pulled code with no reinstall.
-LAUNCHER="$BIN_DIR/markdown-to-pdf"
-cat >"$LAUNCHER" <<EOF
-#!/usr/bin/env bash
-# Generated by markdown-to-pdf's install.sh — do not edit; re-run install.sh.
-#
-# The converter and its virtualenv stay in the clone this was installed from, so
-# keep that clone around; if you move it, re-run its install.sh.
-set -euo pipefail
-RUN_SH="$SCRIPT_DIR/run.sh"
-if [ ! -x "\$RUN_SH" ]; then
-  echo "error: markdown-to-pdf is not where it was installed from (\$RUN_SH)." >&2
-  echo "       The clone was moved or deleted — re-run install.sh from it." >&2
-  exit 1
-fi
-exec "\$RUN_SH" "\$@"
-EOF
-chmod 0755 "$LAUNCHER"
-
-echo "installed markdown-to-pdf -> $LAUNCHER"
+temporary="$(mktemp "$bin_dir/.install.XXXXXXXX")"
+trap 'rm -f -- "$temporary"' EXIT
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'run_sh=%q\n' "$script_dir/run.sh"
+  printf '%s\n' \
+    'if [[ ! -x "$run_sh" ]]; then' \
+    '  printf "error: markdown-to-pdf is not where it was installed from (%s).\n" "$run_sh" >&2' \
+    '  echo "       The clone was moved or deleted; re-run install.sh from it." >&2' \
+    '  exit 1' \
+    'fi' \
+    'exec "$run_sh" "$@"'
+} > "$temporary"
+chmod 755 "$temporary"
+mv -f -- "$temporary" "$destination"
+[[ -f "$destination" && -x "$destination" ]]
+printf 'Installed %s\n' "$destination"
 
 # A launcher nobody can invoke is not an install. Say so, with the fix.
 case ":${PATH}:" in
-  *":$BIN_DIR:"*) ;;
+  *":$bin_dir:"*) ;;
   *)
     echo >&2
-    echo "note: $BIN_DIR is not on your \$PATH, so \`markdown-to-pdf\` won't be found yet." >&2
+    echo "note: $bin_dir is not on your \$PATH, so \`$command_name\` won't be found yet." >&2
     echo "      Add it to your shell startup file, e.g.:" >&2
-    echo "        echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc   # or ~/.bashrc" >&2
+    echo "        echo 'export PATH=\"$bin_dir:\$PATH\"' >> ~/.zshrc   # or ~/.bashrc" >&2
     ;;
 esac
