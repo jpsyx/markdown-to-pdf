@@ -20,6 +20,7 @@ The visual system:
 Usage:
     python main.py chapter.md
     python main.py chapter.md --out chapter.pdf
+    python main.py chapter.md chapter.pdf
     python main.py chapter.md --black-text
 
 If the output path already exists, the script prompts to overwrite or to
@@ -2732,6 +2733,12 @@ def main() -> None:
     )
     parser.add_argument("markdown", type=Path, help="Markdown file path, e.g. chapter.md")
     parser.add_argument(
+        "output",
+        type=Path,
+        nargs="?",
+        help="Optional PDF file or output directory (shorthand for --out).",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -2769,6 +2776,9 @@ def main() -> None:
         help="Agenda mode. Bundles --no-table-borders + --compact-tables and zeroes LEFTPADDING on table cells — the styling the /todo agenda PDF requires. Use this for any agenda regeneration so the styling can't be forgotten by individual callers.",
     )
     args = parser.parse_args()
+    if args.output is not None and args.out is not None:
+        parser.error("cannot use output together with --out; specify only one output destination")
+    output_path = args.output if args.output is not None else args.out
     # --agenda forces all four agenda-flavor table tweaks on regardless of
     # what the caller passed. Single, hard-to-forget switch for the agenda
     # flow; never fires for non-agenda documents.
@@ -2778,7 +2788,7 @@ def main() -> None:
     try:
         output = convert_markdown_to_pdf(
             args.markdown,
-            args.out,
+            output_path,
             table_borders=table_borders,
             compact_tables=compact_tables,
             font_shrink=args.font_shrink,

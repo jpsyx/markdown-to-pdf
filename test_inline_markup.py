@@ -51,6 +51,40 @@ class EmojiWrapping(unittest.TestCase):
         self.assertEqual(wrapped, "send → Aseel")
 
 
+class CLIOutput(unittest.TestCase):
+    def test_output_forms_reach_converter(self):
+        for arguments, expected in [
+            (["input.md"], None),
+            (["input.md", "output file.pdf"], Path("output file.pdf")),
+            (["input.md", "exports/"], Path("exports/")),
+            (["input.md", "--out", "output.pdf"], Path("output.pdf")),
+            (["input.md", "output.pdf", "--black-text"], Path("output.pdf")),
+        ]:
+            with (
+                self.subTest(arguments=arguments),
+                unittest.mock.patch.object(sys, "argv", ["markdown-to-pdf", *arguments]),
+                unittest.mock.patch.object(main, "convert_markdown_to_pdf") as convert,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                main.main()
+                self.assertEqual(convert.call_args.args, (Path("input.md"), expected))
+                self.assertEqual(convert.call_args.kwargs["black_text"], "--black-text" in arguments)
+
+    def test_duplicate_output_is_an_argument_error(self):
+        with (
+            unittest.mock.patch.object(sys, "argv", [
+                "markdown-to-pdf", "input.md", "first.pdf", "--out", "second.pdf",
+            ]),
+            unittest.mock.patch.object(main, "convert_markdown_to_pdf") as convert,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit) as error,
+        ):
+            main.main()
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("cannot use output together with --out", stderr.getvalue())
+        convert.assert_not_called()
+
+
 class Version(unittest.TestCase):
     def test_version_is_semver(self):
         # __version__ is the single source of truth for the tool's version.

@@ -7,8 +7,8 @@ shell entry point (`markdown-to-pdf.sh`).
 ## Flow
 
 ```
-run.sh <file.md> [--out <path>]
-  └─ exec python3 main.py <file.md> [--out <path>]
+run.sh <file.md> [<path> | --out <path>]
+  └─ exec python3 main.py <file.md> [<path> | --out <path>]
        ├─ read + normalize the Markdown text
        ├─ parse_markdown() → a list of ReportLab Flowables (the "story")
        └─ convert_markdown_to_pdf() → SimpleDocTemplate.build(story) → PDF
