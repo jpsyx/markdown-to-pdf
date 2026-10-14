@@ -240,6 +240,37 @@ class Links(unittest.TestCase):
         out = main.inline_markup("[**bold**](https://x.com)")
         self.assertIn("<b>bold</b>", out)
 
+    def test_code_formatted_link_label_is_clickable_code(self):
+        base = str(Path.cwd())
+        target = (Path(base) / "docs/design.md").as_uri()
+        out = main.inline_markup("[`docs/design.md`](docs/design.md)", base_dir=base)
+        cell = Paragraph(out, main.make_styles()["body"])
+        self.assertEqual(cell.getPlainText(), "docs/design.md")
+        self.assertNotIn("\x01", out)
+        code = cell.frags[0]
+        self.assertEqual(code.fontName, main.CODE_FONT)
+        self.assertLess(code.fontSize, cell.style.fontSize)
+        self.assertIn(target, [href for _, href in code.link])
+
+    def test_linked_and_unlinked_code_spans_keep_their_own_text(self):
+        out = main.inline_markup(
+            "`before` [`first.md`](https://example.com/first) "
+            "and [`second.md`](https://example.com/second) `after`"
+        )
+        cell = Paragraph(out, main.make_styles()["body"])
+        self.assertEqual(cell.getPlainText(), "before first.md and second.md after")
+        self.assertNotRegex(out, r"[\x01\x02]")
+
+    def test_code_in_link_labels_stays_literal_and_escaped(self):
+        out = main.inline_markup(
+            "[**Use** ``a_b <T> & `x` *literal*``](https://example.com)"
+        )
+        cell = Paragraph(out, main.make_styles()["body"])
+        self.assertEqual(cell.getPlainText(), "Use a_b <T> & `x` *literal*")
+        self.assertIn("<b>Use</b>", out)
+        self.assertIn("&lt;T&gt; &amp;", out)
+        self.assertNotIn("<i>", out)
+
     def test_underscore_in_href_not_italicized(self):
         out = main.inline_markup("[a](song_list.md)", base_dir="/d")
         self.assertNotIn("<i>", out)
@@ -952,6 +983,50 @@ class Typography(unittest.TestCase):
         markup = main.inline_markup("call `getNeededColumns` here")
         self.assertIn(f'name="{main.CODE_FONT}"', markup)
         self.assertNotIn('name="Courier"', markup)
+
+    def test_inline_code_is_smaller_than_surrounding_serif_text(self):
+        # Equal point sizes make Menlo look larger than Charter. Check the
+        # parsed fragments, including styles used by tables and lists.
+        for shrink in (0, 1):
+            styles = main.make_styles(font_shrink=shrink)
+            for key in ("body", "table_cell", "table_header", "bullet", "callout"):
+                with self.subTest(shrink=shrink, style=key):
+                    style = styles[key]
+                    cell = Paragraph(main.inline_markup("Text `identifier` text"), style)
+                    prose, code, trailing = cell.frags
+                    self.assertLessEqual(code.fontSize, prose.fontSize * 0.85)
+                    self.assertGreaterEqual(code.fontSize, 7)
+                    self.assertEqual(prose.fontSize, style.fontSize)
+                    self.assertEqual(trailing.fontSize, style.fontSize)
+
+    def test_inline_code_size_tracks_the_paragraph_style(self):
+        markup = main.inline_markup("`identifier`")
+        for key in ("body", "table_cell", "h2"):
+            normal = main.make_styles()[key]
+            smaller = main.make_styles(font_shrink=1)[key]
+            original = Paragraph(markup, normal).frags[0]
+            reduced = Paragraph(markup, smaller).frags[0]
+            with self.subTest(style=key):
+                self.assertLess(original.fontSize, normal.fontSize)
+                self.assertAlmostEqual(original.fontSize - reduced.fontSize, 1)
+
+    def test_inline_filename_fits_without_an_unnecessary_table_line(self):
+        cell = Paragraph(
+            main.inline_markup("`schemas/20.database_connections__postgres.sql`"),
+            main.make_styles()["table_cell"],
+        )
+        _, height = cell.wrap(250, 100)
+        self.assertEqual(height, cell.style.leading)
+
+    def test_fenced_code_is_compact_and_legible(self):
+        for shrink in (0, 1):
+            styles = main.make_styles(font_shrink=shrink)
+            code = styles["code"]
+            with self.subTest(shrink=shrink):
+                self.assertLessEqual(code.fontSize, styles["body"].fontSize * 0.85)
+                self.assertGreaterEqual(code.fontSize, 7)
+                self.assertLessEqual(code.leading, 12)
+                self.assertGreaterEqual(code.leading / code.fontSize, 1.25)
 
     def test_body_leading_is_open_enough_for_a_long_measure(self):
         # The text block fits over 100 characters per line, well past the 65-75

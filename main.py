@@ -832,7 +832,9 @@ def inline_markup(text: str, base_dir: str | None = None) -> str:
     def _restore(match: re.Match) -> str:
         idx = int(match.group(1))
         body = escape(code_spans[idx])
-        return f'<font name="{CODE_FONT}" backColor="{CODE_FILL.hexval()}">{body}</font>'
+        # Monospace looks larger than the serif at equal point sizes. A
+        # relative size keeps code in headings and shrunken text in proportion.
+        return f'<font name="{CODE_FONT}" size="-2" backColor="{CODE_FILL.hexval()}">{body}</font>'
 
     text = re.sub(r"\x01CODE(\d+)\x01", _restore, text)
 
@@ -841,6 +843,9 @@ def inline_markup(text: str, base_dir: str | None = None) -> str:
         def _restore_link(match: re.Match) -> str:
             label, target = links[int(match.group(1))]
             inner = _emphasis(escape(label))
+            # Labels were stashed before the outer code-restoration pass, so
+            # restore their code spans too, after escaping and emphasis.
+            inner = re.sub(r"\x01CODE(\d+)\x01", _restore, inner)
             href = _resolve_href(target, base_dir)
             href_attr = escape(href, {'"': "&quot;"})
             link_color = BLACK if _BLACK_TEXT else LINK_COLOR
@@ -1054,8 +1059,8 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
             "MDCode",
             parent=base["Code"],
             fontName=CODE_FONT,
-            fontSize=max(7.0, 9.5 - s),
-            leading=max(9.5, 13 - s),
+            fontSize=max(7.0, 8.5 - s),
+            leading=max(9.5, 11.5 - s),
             textColor=BODY_COLOR,
             alignment=TA_LEFT,
             leftIndent=0,

@@ -52,6 +52,10 @@ absolute checkout path and can be run directly by anyone.
   ships at `/System/Library/Fonts/SFNSMono.ttf` is Light, which prints anaemic.
 - **Styles** (`make_styles`): builds the `ParagraphStyle` set (headings, body,
   code, callouts, tables) and the page geometry constants (margins, brand colors).
+  Inline code sits 2 pt below its surrounding text (8.5 pt in the default
+  10.5 pt body and tables), so the monospace face does not overpower the serif.
+  Fenced code uses 8.5 pt type with 11.5 pt leading; `--font-shrink` retains
+  its 7 pt type and 9.5 pt leading floors for these blocks.
 - **Inline markup** (`normalize_text`, `_extract_code_spans`, `inline_markup`):
   pure string transforms that turn Markdown inline syntax (bold/italic, inline
   code) into ReportLab's mini-HTML. These are the most logic-dense, edge-case
