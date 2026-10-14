@@ -769,14 +769,51 @@ def _extract_code_spans(text: str) -> tuple[str, list[str]]:
 
 def _emphasis(text: str) -> str:
     """Apply bold/italic (`**`,`*`,`__`,`_`) markdown emphasis to escaped text."""
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<i>\1</i>", text)
-    # Underscore emphasis. Guarded by word boundaries so intraword underscores
-    # (snake_case, file_name.py) stay literal, per CommonMark. Bold (__) runs
-    # before italic (_) so a __run__ isn't half-consumed by the single-_ pass.
-    text = re.sub(r"(?<![\w_])__(\S(?:.*?\S)?)__(?![\w_])", r"<b>\1</b>", text)
-    text = re.sub(r"(?<![\w_])_(\S(?:.*?\S)?)_(?![\w_])", r"<i>\1</i>", text)
-    return text
+    # Match delimiter runs before emitting tags. Independent substitutions can
+    # turn **outer *inner*** into crossed tags that ReportLab cannot parse.
+    parts: list[str] = []
+    openers: list[dict] = []
+    end = 0
+    for match in re.finditer(r"\*+|_+", text):
+        parts.append(text[end:match.start()])
+        marker = match.group()[0]
+        remaining = len(match.group())
+        before = text[match.start() - 1] if match.start() else " "
+        after = text[match.end()] if match.end() < len(text) else " "
+        can_open = not after.isspace()
+        can_close = not before.isspace()
+        # Keep intraword underscores (snake_case, file_name.py) literal.
+        if marker == "_":
+            can_open = can_open and not before.isalnum()
+            can_close = can_close and not after.isalnum()
+        closing = ""
+        while can_close and remaining:
+            index = next((i for i in range(len(openers) - 1, -1, -1)
+                          if openers[i]["marker"] == marker), None)
+            if index is None:
+                break
+            opener = openers[index]
+            # Unmatched intervening openers must stay literal; letting them
+            # match later would create crossing emphasis spans.
+            del openers[index + 1:]
+            count = 2 if min(opener["remaining"], remaining) >= 2 else 1
+            tag = "b" if count == 2 else "i"
+            opener["remaining"] -= count
+            remaining -= count
+            opener["tags"] = f"<{tag}>" + opener["tags"]
+            parts[opener["part"]] = (
+                opener["closing"] + marker * opener["remaining"] + opener["tags"]
+            )
+            closing += f"</{tag}>"
+            if not opener["remaining"]:
+                openers.pop()
+        if can_open and remaining:
+            openers.append({"marker": marker, "remaining": remaining,
+                            "part": len(parts), "tags": "", "closing": closing})
+        parts.append(closing + marker * remaining)
+        end = match.end()
+    parts.append(text[end:])
+    return "".join(parts)
 
 
 # Markdown inline link: [text](target). Not preceded by ! (that's an image).

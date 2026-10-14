@@ -165,6 +165,29 @@ class UnderscoreLeftLiteral(unittest.TestCase):
 
 
 class AsteriskStillWorks(unittest.TestCase):
+    def test_nested_emphasis_closes_in_order(self):
+        cases = [
+            ("**active performance, with noise *amplification up to +20.4 dB***",
+             "<b>active performance, with noise <i>amplification up to +20.4 dB</i></b>"),
+            ("*outer **inner***", "<i>outer <b>inner</b></i>"),
+            ("***both***", "<i><b>both</b></i>"),
+            ("**outer *inner* end**", "<b>outer <i>inner</i> end</b>"),
+            ("__outer _inner___", "<b>outer <i>inner</i></b>"),
+            ("_outer __inner___", "<i>outer <b>inner</b></i>"),
+            ("**outer _inner_ end**", "<b>outer <i>inner</i> end</b>"),
+        ]
+        for source, expected in cases:
+            with self.subTest(source=source):
+                rendered = main.inline_markup(source)
+                self.assertEqual(rendered, expected)
+                Paragraph(rendered, main.make_styles()["body"])
+
+    def test_unmatched_and_crossed_emphasis_stays_parseable(self):
+        for source in ("**unclosed", "*unclosed", "**bold _crossed** italic_",
+                       "_italic **crossed_ bold**", "plain * text *"):
+            with self.subTest(source=source):
+                Paragraph(main.inline_markup(source), main.make_styles()["body"])
+
     def test_asterisk_italic(self):
         self.assertEqual(main.inline_markup("*italic*"), "<i>italic</i>")
 
