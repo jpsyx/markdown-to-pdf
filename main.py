@@ -1519,7 +1519,9 @@ def code_block(
         # font tag stops at the end of the glyphs.
         table = _highlighted_code_table(lines, language, style, black_text, highlight_lines, width)
     else:
-        table = Table([[cell]], colWidths=[width])
+        # The block is one row for its background and padding. Allow splitting
+        # inside that row so Preformatted/XPreformatted can paginate long code.
+        table = Table([[cell]], colWidths=[width], splitInRow=1)
         table.setStyle(
             TableStyle(
                 [

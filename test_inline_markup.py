@@ -662,6 +662,50 @@ def _code_cell(source, language, *, black_text=False):
     return table._cellvalues[0][0]
 
 
+class CodeBlockPagination(unittest.TestCase):
+    def _render(self, source, *, black_text=False):
+        # Keep content streams readable so we can check that pagination neither
+        # drops nor duplicates source text, without a PDF-reader dependency.
+        canvas_type = main.NumberedCanvas
+
+        def uncompressed_canvas(*args, **kwargs):
+            canvas = canvas_type(*args, **kwargs)
+            canvas.setPageCompression(0)
+            return canvas
+
+        with tempfile.TemporaryDirectory() as directory:
+            markdown = Path(directory) / "long-code.md"
+            markdown.write_text(source, encoding="utf-8")
+            with unittest.mock.patch.object(main, "NumberedCanvas", uncompressed_canvas):
+                pdf = main.convert_markdown_to_pdf(markdown, black_text=black_text)
+            return pdf.read_bytes()
+
+    def test_long_fences_preserve_every_line_across_pages(self):
+        lines = [f'print("line_{n:03d}", {n})' for n in range(120)]
+        for info, black_text in [
+            ("", False), ("python", False), ("python", True),
+            ("unknown-language", False), ("python {2-5}", False),
+        ]:
+            with self.subTest(info=info, black_text=black_text):
+                pdf = self._render(
+                    f"```{info}\n" + "\n".join(lines) + "\n```\n",
+                    black_text=black_text,
+                )
+                self.assertGreater(len(re.findall(rb"/Type /Page\b", pdf)), 1)
+                for n in range(120):
+                    self.assertEqual(pdf.count(f"line_{n:03d}".encode()), 1)
+
+    def test_one_wrapped_source_line_can_span_pages(self):
+        for info in ("", "python"):
+            with self.subTest(info=info):
+                # Each marker fits on one physical line even after wrapping.
+                source = " ".join(f"item_{n:04d}" for n in range(1000))
+                pdf = self._render(f"```{info}\n{source}\n```\n")
+                self.assertGreater(len(re.findall(rb"/Type /Page\b", pdf)), 1)
+                for n in range(1000):
+                    self.assertEqual(pdf.count(f"item_{n:04d}".encode()), 1)
+
+
 class SyntaxHighlighting(unittest.TestCase):
     """A tagged fence is colored per token; an untagged one stays plain.
 
