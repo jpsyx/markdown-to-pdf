@@ -30,6 +30,17 @@ Body text is set in a print serif (Charter where available), headings in a
 humanist sans, and code in Menlo, each chosen from a per-platform candidate list
 and falling back to the built-in PDF fonts when none is installed.
 
+Tables fit their columns using the actual wrapped text, including bold text
+and inline code. The target is at least two words per line in each multiword
+body cell; single-word labels and values are exempt. The renderer searches for
+widths that meet that target before reducing table type in 0.5-point steps,
+down to 8 points. At that floor it balances density and row height as well as
+the page allows. Body text outside the table keeps its original size.
+Words are never split at arbitrary characters: body cells may wrap at existing
+hyphens or slashes, and header words stay intact. Headers repeat on subsequent
+pages; ordinary rows stay together, while a row taller than a page can continue
+onto the next page.
+
 Fenced code blocks are syntax highlighted when the fence carries a language
 tag (```typescript, ```python, ```sql, ...); an untagged fence renders plain.
 A fence may also call out lines, using the meta-string convention Docusaurus and

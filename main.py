@@ -47,6 +47,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from functools import lru_cache
 from typing import Iterable, Sequence
 from html import unescape
 from xml.sax.saxutils import escape
@@ -626,6 +627,9 @@ CONTENT_HEIGHT = PAGE_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN - (2 * FRAME_PADDING)
 # roughly this, a cell cannot seat a single glyph and ReportLab raises rather
 # than clipping, so it is a floor on column width and not a style choice.
 MIN_CELL_CONTENT_WIDTH = 6.0
+MIN_TABLE_FONT_SIZE = 8.0
+TABLE_FONT_STEP = 0.5
+TABLE_WORDS_PER_LINE = 2.0
 
 # The page-number footer is drawn into the bottom margin, under the frame, so
 # it costs no content height and no existing pagination changes because of it.
@@ -1791,6 +1795,7 @@ def group_diagram_figures(
     height a caption needs can only be measured once it is a flowable.
     """
     grouped: list[Flowable] = []
+    heading_names = {styles[key].name for key in ("title", "h2", "h3", "h4", "h5", "h6")}
     index = 0
     while index < len(story):
         flowable = story[index]
@@ -1818,7 +1823,16 @@ def group_diagram_figures(
         if explanation and not is_diagram_caption(explanation[-1]):
             explanation = []
 
+        # keepWithNext alone cannot fit a heading plus a full-page diagram.
+        # Reserve the heading's height as part of the figure, even without a
+        # caption, instead of leaving a page containing only the heading.
+        headings = []
+        while (grouped and isinstance(grouped[-1], Paragraph)
+               and grouped[-1].style.name in heading_names):
+            headings.insert(0, grouped.pop())
         if not explanation:
+            cursor = index + 1
+        if not explanation and not headings:
             grouped.append(flowable)
             index += 1
             continue
@@ -1828,19 +1842,20 @@ def group_diagram_figures(
         own_spacing = getattr(flowable, "spaceBefore", 0) + getattr(
             flowable, "spaceAfter", 0
         )
-        reserved = _measure(explanation) + own_spacing + FIGURE_SLACK
+        heading_height = _measure(headings)
+        reserved = heading_height + _measure(explanation) + own_spacing + FIGURE_SLACK
         floor = MIN_DIAGRAM_HEIGHT_FRACTION * CONTENT_HEIGHT
         if CONTENT_HEIGHT - reserved < floor:
             # The explanation is what has to give. Shrink it enough to leave
             # the drawing its floor, then re-measure.
-            room = max(CONTENT_HEIGHT - floor - own_spacing - FIGURE_SLACK, 1.0)
+            room = max(CONTENT_HEIGHT - floor - heading_height - own_spacing - FIGURE_SLACK, 1.0)
             explanation = _shrink_caption(explanation, room / max(reserved, 1.0))
-            reserved = _measure(explanation) + own_spacing + FIGURE_SLACK
+            reserved = heading_height + _measure(explanation) + own_spacing + FIGURE_SLACK
         fit = mermaid_fit(width, height, reserved_height=reserved)
         flowable.drawWidth = width * fit
         flowable.drawHeight = height * fit
 
-        grouped.append(KeepTogether([flowable, *explanation]))
+        grouped.append(KeepTogether([*headings, flowable, *explanation]))
         index = cursor
     return grouped
 
@@ -2058,8 +2073,8 @@ def fit_column_widths(
 
     `max_widths[i]` is the width column *i* needs to render its widest cell on
     one line; `min_widths[i]` is the width of its longest unbreakable word (the
-    narrowest it can get without clipping). Pure arithmetic, no ReportLab —
-    measuring lives in `measure_column_widths`.
+    narrowest it can get without clipping). Pure arithmetic, no ReportLab;
+    measuring lives in `_fit_table`.
 
     Three cases:
 
@@ -2106,18 +2121,6 @@ def fit_column_widths(
     return _apply_width_floor(widths, available, floor)
 
 
-def _text_width(text: str, style: ParagraphStyle) -> float:
-    """Width of `text` in `style`'s font, or a rough estimate if unmeasurable."""
-    if not text:
-        return 0.0
-    try:
-        return pdfmetrics.stringWidth(text, style.fontName, style.fontSize)
-    except (KeyError, ValueError, UnicodeEncodeError):
-        # A glyph the base-14 font can't encode (an emoji, say). Estimate
-        # rather than fail: column sizing is a layout hint, not a contract.
-        return len(text) * style.fontSize * 0.55
-
-
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -2130,24 +2133,173 @@ def _visible_cell_text(cell: str) -> str:
     return html.unescape(_TAG_RE.sub("", inline_markup(cell)))
 
 
-def measure_column_widths(
-    columns: Sequence[Sequence[tuple[str, ParagraphStyle]]],
+def _table_markup(cell: str, font_size: float) -> str:
+    """Allow breaks at slashes without inserting a visible gap or a hyphen.
+
+    ReportLab does not recognize zero-width spaces as word boundaries. A
+    zero-size space provides that boundary, including inside styled links and
+    code, without changing their appearance. Only text nodes are transformed.
+    Keep inline code at the same readable floor as the surrounding table.
+    """
+    markup = inline_markup(cell)
+    code_size = f'size="{max(MIN_TABLE_FONT_SIZE, font_size - 2):g}"'
+    return "".join(
+        part.replace('size="-2"', code_size) if part.startswith("<")
+        else part.replace("/", '/<font size="0"> </font>')
+        for part in re.split(r"(<[^>]+>)", markup)
+    )
+
+
+def _fit_table(
+    header: list[str], rows: list[list[str]], styles: dict[str, ParagraphStyle],
     padding: float,
-) -> tuple[list[float], list[float]]:
-    """Measure each column's (longest-word, widest-cell) width, incl. padding."""
-    min_widths: list[float] = []
-    max_widths: list[float] = []
-    for column in columns:
-        col_min = 0.0
-        col_max = 0.0
-        for cell, style in column:
-            text = _visible_cell_text(cell)
-            col_max = max(col_max, _text_width(text, style))
-            for word in text.split():
-                col_min = max(col_min, _text_width(word, style))
-        min_widths.append(col_min + padding)
-        max_widths.append(max(col_min, col_max) + padding)
-    return min_widths, max_widths
+) -> tuple[list[list[Paragraph]], list[float]]:
+    """Find widths from actual line breaks, then retry at smaller type sizes.
+
+    Each multiword body cell targets at least two source words per rendered
+    line, including its final line. Single-word labels, numbers, and empty
+    cells are exempt; headers must fit whole words. Binary searches find each
+    column's required width before any font reduction. At the readable floor,
+    bounded pairwise width transfers minimize density deficits and row height.
+    Measuring fresh paragraphs is essential: ReportLab mutates wrapped frags.
+    """
+    has_header = any(cell.strip() for cell in header)
+    source = ([header] if has_header else []) + rows
+    if not source:
+        source = [[""] * len(header)]
+    word_counts = [[len(_visible_cell_text(cell).split()) for cell in row] for row in source]
+    size = max(MIN_TABLE_FONT_SIZE, styles["table_cell"].fontSize)
+    n_cols = len(header)
+    available = CONTENT_WIDTH
+
+    while True:
+        cell_styles = {}
+        for key in ("table_cell", "table_header"):
+            style = copy.copy(styles[key])
+            style.fontSize = size
+            # Reduce both the glyph size and the interline gap, retaining a
+            # readable 4pt gap. Unchanged-size tables retain their leading.
+            style.leading = max(size + 4, styles[key].leading - 2 * (styles[key].fontSize - size))
+            # Never use ReportLab's character-by-character emergency wrapping.
+            style.splitLongWords = 0
+            style.spaceShrinkage = 0
+            style.hyphenationLang = ""
+            style.uriWasteReduce = 0
+            # Existing hyphens are safe body breakpoints. Header words remain
+            # intact, even where the source contains discretionary hyphens.
+            style.embeddedHyphenation = 1 if key == "table_cell" else 0
+            cell_styles[key] = style
+        data = [
+            [Paragraph(_table_markup(cell.replace("\u00ad", "") if has_header and r == 0 else cell, size),
+                       cell_styles["table_header" if has_header and r == 0 else "table_cell"])
+             for cell in row]
+            for r, row in enumerate(source)
+        ]
+
+        @lru_cache(maxsize=8192)
+        def measure(col: int, width: float) -> tuple[float, float, tuple[float, ...]]:
+            overflow = deficit = 0.0
+            heights = []
+            for r, row in enumerate(data):
+                cell = row[col]
+                p = Paragraph(cell.text, cell.style)
+                _, height = p.wrap(max(MIN_CELL_CONTENT_WIDTH, width - padding), CONTENT_HEIGHT)
+                lines = p.blPara.lines
+                overflow += sum(max(0.0, -(line[0] if p.blPara.kind == 0 else line.extraSpace))
+                                for line in lines)
+                words = word_counts[r][col]
+                if words >= 2 and not (has_header and r == 0):
+                    allowed = max(1, int(words / TABLE_WORDS_PER_LINE))
+                    deficit += max(0.0, len(lines) / allowed - 1) ** 2
+                heights.append(height)
+            return overflow, deficit, tuple(heights)
+
+        floor = padding + MIN_CELL_CONTENT_WIDTH
+        # Unwrapped widths use the actual bold/code/emoji fonts, not a plain
+        # text approximation. All search bounds include cell padding.
+        natural = []
+        for col in range(n_cols):
+            width = floor
+            for row in data:
+                p = Paragraph(row[col].text, row[col].style)
+                p.wrap(1e6, CONTENT_HEIGHT)
+                for line in p.blPara.lines:
+                    extra = line[0] if p.blPara.kind == 0 else line.extraSpace
+                    width = max(width, 1e6 - extra + padding + 0.02)
+            natural.append(width)
+
+        def required(col: int, density: bool) -> float:
+            low, high = floor, natural[col]
+            if density and measure(col, high)[1] > 0:
+                # Explicit hard breaks cannot be fixed by widening a column.
+                return max(high, available + 1)
+            while high - low > 0.1:
+                mid = (low + high) / 2
+                overflow, deficit, _ = measure(col, mid)
+                if overflow <= 0.001 and (not density or deficit == 0):
+                    high = mid
+                else:
+                    low = mid
+            return high
+
+        targets = [required(col, True) for col in range(n_cols)]
+        feasible = sum(targets) <= available
+        if not feasible and size > MIN_TABLE_FONT_SIZE:
+            size = max(MIN_TABLE_FONT_SIZE, size - TABLE_FONT_STEP)
+            continue
+
+        minimums = targets if feasible else [required(col, False) for col in range(n_cols)]
+        widths = fit_column_widths(minimums, natural if feasible else targets, available, floor=floor)
+        # If even intact words cannot fit, preserve them and choose the least
+        # overflow rather than silently slicing them into arbitrary fragments.
+        lower = minimums if sum(minimums) <= available else [floor] * n_cols
+
+        def score(candidate: list[float]) -> tuple[float, float, float]:
+            metrics = [measure(c, round(w, 5)) for c, w in enumerate(candidate)]
+            height = sum(max(m[2][r] for m in metrics) for r in range(len(data)))
+            density = sum(m[1] for m in metrics)
+            return (round(sum(m[0] for m in metrics), 4),
+                    round(density + 0.03 * height / cell_styles["table_cell"].leading, 6), height)
+
+        best = score(widths)
+        # Transfer spare width toward columns that shorten the tallest cells.
+        # Several step sizes escape coarse allocations while bounding work.
+        for step in (8.0, 4.0, 2.0, 0.5):
+            for _ in range(2 * n_cols):
+                winner, winner_score = None, best
+                for donor in range(n_cols):
+                    if widths[donor] - step < lower[donor]:
+                        continue
+                    for recipient in range(n_cols):
+                        if donor == recipient:
+                            continue
+                        candidate = widths[:]
+                        candidate[donor] -= step
+                        candidate[recipient] += step
+                        candidate_score = score(candidate)
+                        if candidate_score < winner_score:
+                            winner, winner_score = candidate, candidate_score
+                if winner is None:
+                    break
+                widths, best = winner, winner_score
+        return data, widths
+
+
+class _ReadableTable(Table):
+    """Keep ordinary rows whole; split only rows taller than a fresh page."""
+
+    def split(self, availWidth, availHeight):
+        self.splitInRow = 0
+        parts = super().split(availWidth, availHeight)
+        if parts:
+            return parts
+        header_rows = self.repeatRows
+        frame_height = getattr(getattr(self, "_frame", None), "_aH", CONTENT_HEIGHT)
+        if (len(self._rowHeights) > header_rows
+                and sum(self._rowHeights[:header_rows + 1]) > frame_height):
+            self.splitInRow = 1
+            return super().split(availWidth, availHeight)
+        return []
 
 
 def render_table(
@@ -2162,10 +2314,9 @@ def render_table(
 ) -> Table:
     """Render a GFM table as a ReportLab Table with content-fitted columns.
 
-    Column widths come from what the cells actually contain (see
-    `fit_column_widths`), so a `#` column of single digits stays narrow and the
-    space it used to waste goes to the prose columns. The table still spans the
-    full text block.
+    Column widths and font size are fitted to measured paragraph line breaks
+    by `_fit_table`. Small labels stay narrow while prose receives enough room
+    to read naturally. The table spans the usable frame width.
 
     If every header cell is empty (a common pattern when the user wants a
     pure-grid layout — GFM requires a header row but the user has nothing
@@ -2192,33 +2343,10 @@ def render_table(
     alignments = alignments + ["LEFT"] * (n_cols - len(alignments))
 
     header_is_empty = all(not cell.strip() for cell in header)
-    available = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
-
-    data: list[list[Flowable]] = []
-    if not header_is_empty:
-        data.append([
-            Paragraph(inline_markup(cell), styles["table_header"]) for cell in header
-        ])
-    for row in rows:
-        data.append([
-            Paragraph(inline_markup(cell), styles["table_cell"]) for cell in row
-        ])
-
     top_pad, bot_pad = (1, 1) if compact else (6, 6)
     left_pad = 0 if agenda_tables else 8
     right_pad = 8
-    columns = [
-        [(row[col], styles["table_cell"]) for row in rows]
-        + ([] if header_is_empty else [(header[col], styles["table_header"])])
-        for col in range(n_cols)
-    ]
-    col_widths = fit_column_widths(
-        *measure_column_widths(columns, left_pad + right_pad),
-        available,
-        # A column has to seat its own padding plus a glyph or two, or ReportLab
-        # is handed a negative content width and raises instead of wrapping.
-        floor=left_pad + right_pad + MIN_CELL_CONTENT_WIDTH,
-    )
+    data, col_widths = _fit_table(header, rows, styles, left_pad + right_pad)
     table_style: list = [
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), left_pad),
@@ -2234,7 +2362,7 @@ def render_table(
     for col_idx, align in enumerate(alignments):
         table_style.append(("ALIGN", (col_idx, 0), (col_idx, -1), align_map[align]))
 
-    table = Table(data, colWidths=col_widths)
+    table = _ReadableTable(data, colWidths=col_widths, repeatRows=0 if header_is_empty else 1)
     table.setStyle(TableStyle(table_style))
     table.hAlign = "LEFT"
     table.spaceBefore = 2 if compact else 6

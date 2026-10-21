@@ -109,7 +109,9 @@ absolute checkout path and can be run directly by anyone.
   re-fitted to the page minus that height, minus `FIGURE_SLACK`, since a group
   needing the whole content height can never be placed. Past
   `MIN_DIAGRAM_HEIGHT_FRACTION` the explanation is shrunk instead, by
-  rebuilding its paragraphs against a copied style.
+  rebuilding its paragraphs against a copied style. Preceding headings join
+  the group and reserve their own height, even without a caption, preventing
+  heading-only pages before tall diagrams.
 - **Code wrapping** (`code_columns`, `_segment_code_line`, `wrap_code_line`,
   `wrap_code_markup`): ReportLab's `Preformatted`/`XPreformatted` do not wrap,
   so a long line overflowed the frame and its tail was lost. Lines are broken
@@ -121,14 +123,22 @@ absolute checkout path and can be run directly by anyone.
   standalone Markdown image resolves relative to the input file, rejects URI
   schemes, and becomes an `Image` flowable. The image keeps its aspect ratio,
   fits within the page's content area, and is never enlarged.
-- **Tables** (`_split_table_cells`, `_parse_table_row`, `measure_column_widths`,
-  `fit_column_widths`, `render_table`). Two pieces are worth knowing. Rows are
+- **Tables** (`_split_table_cells`, `_parse_table_row`, `_table_markup`,
+  `_fit_table`, `fit_column_widths`, `_ReadableTable`, `render_table`). Rows are
   split on *unescaped* pipes, so `\|` is a literal pipe inside a cell rather
-  than a cell boundary that shifts every later cell right. Columns are then
-  sized to their content: each column is measured for its longest word and its
-  widest cell, and `fit_column_widths` — pure arithmetic, unit-tested — shares
-  the text block out between them, so an index or checkbox column stays narrow
-  and prose columns get the room. The table always spans the full text block.
+  than a cell boundary that shifts every later cell right. `_fit_table` measures
+  fresh Paragraphs at candidate widths, preserving actual bold/code/emoji font
+  metrics. For each font size it searches for the narrowest column that avoids
+  overflow and averages at least two source words per line in every multiword
+  body cell. It retries in 0.5-point steps down to an 8-point floor. If the
+  density target still cannot fit, width transfers minimize overflow first,
+  then density deficits and total row height. Cached measurements and bounded
+  searches keep the work finite. Header words remain intact; body cells can
+  break at existing hyphens and slashes, without arbitrary character splitting.
+  Inline code shares the 8-point floor. Each table owns copied styles, leaving
+  other tables and body text unchanged. Tables span `CONTENT_WIDTH`, accounting
+  for the frame padding. `_ReadableTable` repeats headers and splits within a
+  row only when that row cannot fit on a fresh page.
 - **Parser** (`parse_markdown`): the line-oriented state machine that walks the
   Markdown and dispatches to the block builders, flushing buffers at boundaries.
 - **Page numbers** (`page_number_text`, `draw_page_footer`, `NumberedCanvas`):

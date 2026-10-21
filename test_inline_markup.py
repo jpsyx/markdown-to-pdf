@@ -441,7 +441,7 @@ class TableRendering(unittest.TestCase):
             ["2", "Deep dive: the organizations still hiring in global development", "Devex Newswire"],
         ]
         widths = self._widths(header, rows, ["RIGHT", "LEFT", "LEFT"])
-        available = main.PAGE_WIDTH - main.LEFT_MARGIN - main.RIGHT_MARGIN
+        available = main.CONTENT_WIDTH
         self.assertAlmostEqual(sum(widths), available, places=4)
         # The `#` column holds one digit; it should be by far the narrowest.
         self.assertLess(widths[0], available / 8)
@@ -468,7 +468,7 @@ class TableRendering(unittest.TestCase):
             for n in range(1, 9)
         ]
         widths = self._widths(header, rows, ["LEFT"] * 5)
-        available = main.PAGE_WIDTH - main.LEFT_MARGIN - main.RIGHT_MARGIN
+        available = main.CONTENT_WIDTH
         self.assertAlmostEqual(sum(widths), available, places=4)
         for width in widths:
             self.assertGreater(width, 16.0)
@@ -482,6 +482,106 @@ class TableRendering(unittest.TestCase):
         table = main.render_table(header, rows, ["LEFT"] * 5, styles)
         available = main.PAGE_WIDTH - main.LEFT_MARGIN - main.RIGHT_MARGIN
         table.wrap(available, main.PAGE_HEIGHT)
+
+
+class AdaptiveTables(unittest.TestCase):
+    def render(self, header, rows):
+        return main.render_table(header, rows, ["LEFT"] * len(header), main.make_styles())
+
+    def lines(self, cell, width):
+        # Measure a fresh paragraph: ReportLab mutates fragments during wrapping.
+        p = Paragraph(cell.text, cell.style)
+        p.wrap(width - 16, main.CONTENT_HEIGHT)
+        return p, p.blPara.lines
+
+    def test_balances_prose_before_reducing_font(self):
+        table = self.render(["#", "Description", "Notes"], [[
+            "1", "A detailed explanation with several ordinary words " * 12,
+            "Short useful notes about this item",
+        ]])
+        self.assertEqual(table._cellvalues[1][1].style.fontSize, 10.5)
+        for cell, width in zip(table._cellvalues[1][1:], table._argW[1:]):
+            p, lines = self.lines(cell, width)
+            self.assertGreaterEqual(len(p.getPlainText().split()) / len(lines), 2)
+
+    def test_retries_at_smaller_font_and_keeps_shared_styles_unchanged(self):
+        styles = main.make_styles()
+        table = main.render_table(["Label"] * 6, [["ordinary words"] * 6], ["LEFT"] * 6, styles)
+        self.assertLess(table._cellvalues[1][0].style.fontSize, 10.5)
+        self.assertGreaterEqual(table._cellvalues[1][0].style.fontSize, 8)
+        for cell, width in zip(table._cellvalues[1], table._argW):
+            _, lines = self.lines(cell, width)
+            self.assertEqual(len(lines), 1)
+        self.assertEqual(styles["table_cell"].fontSize, 10.5)
+        self.assertEqual(styles["body"].fontSize, 10.5)
+
+    def test_dense_table_stops_at_readable_floor_without_splitting_words(self):
+        table = self.render(["Category", "Details", "Quality", "Text/UI", "Duration", "Cost", "Maturity"], [[
+            "Programmatic / video-as-code (Canvas, Templater/nexrender/Plainly)",
+            "Deterministic motion graphics from code/templates",
+            "Whatever you author; exact and repeatable",
+            "Exact: text is a first-class layer with no glyph garbling " * 5,
+            "Yes: arbitrary duration for generated videos",
+            "A few pennies per rendered minute claimed on a standard service " * 5,
+            "Mature rendering; code generation needs careful review",
+        ]])
+        self.assertEqual(table._cellvalues[1][0].style.fontSize, 8)
+        self.assertEqual(table._cellvalues[1][0].style.leading, 12)
+        self.assertAlmostEqual(sum(table._argW), main.CONTENT_WIDTH)
+        for row in table._cellvalues:
+            for cell, width in zip(row, table._argW):
+                p, lines = self.lines(cell, width)
+                self.assertEqual(p._splitLongWordCount, 0)
+                for line in lines:
+                    remaining = line[0] if p.blPara.kind == 0 else line.extraSpace
+                    self.assertGreaterEqual(remaining, -0.01)
+
+    def test_headers_never_split_short_words_even_with_soft_hyphens(self):
+        table = self.render(["Qua\u00adlity", "Text/UI", "Category", "Status", "Owner", "Cost", "Summary"],
+                            [["Ordinary words repeated here " * 5] * 7])
+        for cell, width in zip(table._cellvalues[0], table._argW):
+            p, _ = self.lines(cell, width)
+            self.assertEqual(p._splitLongWordCount, 0)
+            self.assertEqual(p._hyphenations, 0)
+
+    def test_long_rows_paginate_with_repeated_headers(self):
+        markers = [f"item{n:04d}" for n in range(600)]
+        table = self.render(["Label", "Description"], [["Entry", " ".join(markers)]])
+        from reportlab.platypus import SimpleDocTemplate
+        stream = io.BytesIO()
+        SimpleDocTemplate(stream, pagesize=(main.PAGE_WIDTH, main.PAGE_HEIGHT), pageCompression=0).build([table])
+        pdf = stream.getvalue()
+        pages = len(re.findall(rb"/Type /Page\b", pdf))
+        self.assertGreater(pages, 1)
+        self.assertEqual(pdf.count(b"(Description)"), pages)
+        for marker in markers:
+            self.assertEqual(pdf.count(marker.encode()), 1)
+
+    def test_styled_cells_preserve_links_and_readable_code(self):
+        table = self.render(["Label"] * 6, [[
+            "**ordinary words** with `some/path` and [text/UI](https://example.com/a/b)"
+        ] * 6])
+        for cell, width in zip(table._cellvalues[1], table._argW):
+            self.assertIn('https://example.com/a/b', cell.text)
+            self.assertEqual(cell.getPlainText().replace("/ ", "/"),
+                             "ordinary words with some/path and text/UI")
+            for frag in cell.frags:
+                if getattr(frag, "text", "").strip():
+                    self.assertGreaterEqual(frag.fontSize, 8)
+            p, lines = self.lines(cell, width)
+            self.assertEqual(p._splitLongWordCount, 0)
+            self.assertTrue(all(line.extraSpace >= -0.01 for line in lines))
+
+    def test_font_adjustment_does_not_rewrite_literal_code(self):
+        table = self.render(["Example"], [['`size="-2"`']])
+        self.assertEqual(table._cellvalues[1][0].getPlainText(), 'size="-2"')
+
+    def test_a_normal_row_moves_whole_to_the_next_page(self):
+        table = self.render(["Label", "Description"], [["Entry", "Ordinary words for this row. " * 20]])
+        table.wrap(main.CONTENT_WIDTH, main.CONTENT_HEIGHT)
+        # There is room for the header and a few lines, but the entire row can
+        # fit on a fresh page. Do not repeat the header halfway down this one.
+        self.assertEqual(table.split(main.CONTENT_WIDTH, 80), [])
 
 
 class Styles(unittest.TestCase):
@@ -614,7 +714,9 @@ class SoftLineBreaksInLists(unittest.TestCase):
 
     def test_a_table_ends_the_list(self):
         story = main.parse_markdown("- one\n| a | b |\n| --- | --- |\n| 1 | 2 |\n")
-        self.assertEqual([type(f).__name__ for f in story], ["ListFlowable", "Table"])
+        self.assertEqual(len(story), 2)
+        self.assertIsInstance(story[0], main.ListFlowable)
+        self.assertIsInstance(story[1], main.Table)
 
     def test_a_blockquote_ends_the_list(self):
         story = main.parse_markdown("- one\n> quoted\n")
@@ -1600,6 +1702,21 @@ class DiagramAndCaptionShareOnePage(unittest.TestCase):
         story = main.group_diagram_figures(self._story(markdown), main.make_styles())
         self.assertEqual(len(story), 2)
         self.assertNotIsInstance(story[0], KeepTogether)
+
+    def test_heading_stays_with_a_full_page_diagram_without_eating_prose(self):
+        styles = main.make_styles()
+        heading = Paragraph("Recommended pipeline", styles["h3"])
+        diagram = main.Flowable()
+        diagram._mermaid_natural_size = (200, 1000)
+        diagram.drawWidth, diagram.drawHeight = 200, main.CONTENT_HEIGHT
+        prose = Paragraph("Ordinary prose follows.", styles["body"])
+        story = main.group_diagram_figures([heading, diagram, prose], styles)
+        self.assertEqual(len(story), 2)
+        self.assertIsInstance(story[0], KeepTogether)
+        self.assertEqual(story[0]._content, [heading, diagram])
+        self.assertIs(story[1], prose)
+        self.assertLessEqual(diagram.drawHeight + main._measure([heading]),
+                             main.CONTENT_HEIGHT - main.FIGURE_SLACK + 0.01)
 
     def test_a_heading_stops_the_search(self):
         markdown = f"{self.DIAGRAM}\n\n## A heading\n\n*Not this diagram's caption.*\n"
