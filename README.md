@@ -4,10 +4,76 @@ An opinionated utility script to convert a Markdown file to a styled PDF.
 
 This is a small Python tool (built on [ReportLab](https://pypi.org/project/reportlab/)) with a thin shell entry point.
 
+See [publishing and repository transfer](docs/publishing.md) for maintainer setup.
+
+## Install with npm
+
+The npm package is `@avandar/markdown-to-pdf`; its executable is `markdown-to-pdf`.
+These registry commands become available after the package is published:
+
+```sh
+npm install --save-dev @avandar/markdown-to-pdf
+npm exec -- markdown-to-pdf docs/guide.md --out guide.pdf
+
+# Or install the command globally:
+npm install --global @avandar/markdown-to-pdf
+markdown-to-pdf docs/guide.md --out guide.pdf
+```
+
+For a repeatable build, add an npm script to the consuming repository:
+
+```json
+{
+  "scripts": {
+    "build:pdf": "markdown-to-pdf docs/guide.md --out guide.pdf"
+  }
+}
+```
+
+Requires Node.js 20+ and Python 3.10+ with `venv` and pip. On Debian/Ubuntu,
+install `python3-venv` if necessary. Set `MARKDOWN_TO_PDF_PYTHON` to a Python
+executable path to override discovery. The first invocation installs
+`requirements.txt` into a private virtualenv under
+`~/.cache/markdown-to-pdf/npm`. It requires network access to the configured
+Python package index. Later runs reuse it; broken environments are rebuilt.
+Use `MARKDOWN_TO_PDF_CACHE_DIR` to override the cache directory. The npm
+installation directory and global Python environment are not modified.
+Uninstalling the npm package leaves this cache; it can be deleted separately.
+
+Setup happens on invocation, so the Python CLI works even with npm lifecycle
+scripts disabled. Mermaid is an optional npm dependency; `--omit=optional`
+skips it. Rendering diagrams still requires Mermaid's compatible browser and
+system libraries. If its browser download was skipped, provision the browser
+for your installed Puppeteer version before generating diagrams. Otherwise,
+the existing converter falls back to printing diagram source.
+
+In CI, install Node and Python, run `npm ci --include=dev`, then
+`npm run build:pdf`, and upload the PDF with your CI provider's artifact or
+release-upload step. Start with a clean output path: existing PDFs receive
+versioned filenames in noninteractive runs. Cache the Python environment only
+within the same OS, Python installation, and checkout path. The npm lockfile
+does not lock Python dependencies or downloaded fonts/browser assets.
+
+### Test packaging before publication
+
+```sh
+npm pack
+# From a separate consumer repository, use the resulting tarball:
+npm install --save-dev /path/to/avandar-markdown-to-pdf-VERSION.tgz
+```
+
+`npm pack` synchronizes the npm version from `main.py`; change `__version__`
+there for releases. The tarball includes only the CLI runtime, shell entry
+points, version script, and package documentation/license. No programmatic
+JavaScript API is provided. `npm run test:npm` tests packed local/global
+installations using temporary directories (requires network and Python).
+The integration test currently targets POSIX systems; Windows launcher support
+has not been verified.
+
 ## Install
 
 ```sh
-git clone https://github.com/jpsyx/markdown-to-pdf.git
+git clone https://github.com/AvandarLabs/markdown-to-pdf.git
 cd markdown-to-pdf
 ./install.sh          # → ~/.local/bin/markdown-to-pdf
 ```

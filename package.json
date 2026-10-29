@@ -1,8 +1,35 @@
 {
-  "name": "markdown-to-pdf-render",
-  "private": true,
-  "description": "Headless renderer used by main.py for ```mermaid fences.",
-  "dependencies": {
+  "name": "@avandar/markdown-to-pdf",
+  "description": "Convert Markdown files to styled PDFs with a Python-backed command-line tool.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AvandarLabs/markdown-to-pdf.git"
+  },
+  "bin": {
+    "markdown-to-pdf": "bin/markdown-to-pdf.cjs"
+  },
+  "files": [
+    "bin/",
+    "scripts/sync-version.cjs",
+    "main.py",
+    "requirements.txt",
+    "run.sh",
+    "install.sh"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "prepack": "node scripts/sync-version.cjs",
+    "test:npm": "node --test test_npm.cjs"
+  },
+  "optionalDependencies": {
     "@mermaid-js/mermaid-cli": "^11.4.2"
+  },
+  "version": "0.15.0",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }
