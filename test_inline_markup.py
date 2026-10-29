@@ -17,7 +17,7 @@ import zlib
 from pathlib import Path
 
 import main
-from reportlab.platypus import KeepTogether, Paragraph
+from reportlab.platypus import KeepTogether, Paragraph, Preformatted, Table, XPreformatted
 
 
 class EmojiWrapping(unittest.TestCase):
@@ -2283,6 +2283,35 @@ class SmallBlock(unittest.TestCase):
             self.assertEqual(small_after > 0, normal_after > 0)
         self.assertTrue(any(s < n for (n, _), (s, _) in pairs) or any(
             s < n for (_, n), (_, s) in pairs))
+
+    def _code_sizes(self, flowable):
+        """(fontSize, leading) of every code block, nested ones included."""
+        found = []
+        if isinstance(flowable, Table) and not isinstance(flowable, main._ReadableTable):
+            cell = flowable._cellvalues[0][0]
+            if isinstance(cell, (Preformatted, XPreformatted)):
+                found.append((cell.style.fontSize, cell.style.leading))
+        for child in main._stored_children(flowable):
+            found.extend(self._code_sizes(child))
+        return found
+
+    def test_code_shrinks_by_the_same_factor_as_prose(self):
+        normal = main.parse_markdown(self.STEPS)
+        small = main.parse_markdown(f"<small>\n\n{self.STEPS}\n</small>\n\n```\nafter\n```\n")
+        factor = small[0].style.fontSize / normal[0].style.fontSize
+        normal_code = [s for f in normal for s in self._code_sizes(f)]
+        small_code = [s for f in small for s in self._code_sizes(f)]
+        # Both fences, the one inside a list item and the top-level one.
+        self.assertEqual(len(normal_code), 2)
+        for (normal_size, normal_leading), (small_size, small_leading) in zip(normal_code, small_code):
+            self.assertAlmostEqual(small_size, normal_size * factor)
+            self.assertAlmostEqual(small_leading, normal_leading * factor)
+        self.assertEqual(small_code[-1], normal_code[0])
+
+    def test_code_keeps_its_readable_floor(self):
+        story = main.parse_markdown("<small>\n\n```\npnpm dev\n```\n", font_shrink=2.0)
+        ((size, _leading),) = self._code_sizes(story[0])
+        self.assertEqual(size, main.MIN_CODE_FONT_SIZE)
 
     def test_list_numbers_and_bullets_match_their_text(self):
         for marker in ("1.", "-"):

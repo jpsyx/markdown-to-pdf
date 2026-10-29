@@ -33,7 +33,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.14.1"
+__version__ = "0.14.2"
 
 import argparse
 import html
@@ -954,6 +954,11 @@ def inline_markup(text: str, base_dir: str | None = None) -> str:
     return text.replace(HARD_BREAK, "<br/>")
 
 
+# Monospace is unreadable in print below this size, however the type around it
+# shrinks.
+MIN_CODE_FONT_SIZE = 7.0
+
+
 def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[str, ParagraphStyle]:
     """Build the paragraph style sheet.
 
@@ -1152,7 +1157,7 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
             "MDCode",
             parent=base["Code"],
             fontName=CODE_FONT,
-            fontSize=max(7.0, 8.5 - s),
+            fontSize=max(MIN_CODE_FONT_SIZE, 8.5 - s),
             leading=max(9.5, 11.5 - s),
             textColor=BODY_COLOR,
             alignment=TA_LEFT,
@@ -1167,8 +1172,10 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
 # A `<small>` ... `</small>` region on lines of their own (a glossary table,
 # or steps a reader follows rather than studies) reads smaller but stays
 # readable. Prose and tables both drop 1.5 pt, so the two match; a table still
-# stops its fitting search at MIN_TABLE_FONT_SIZE. The space between blocks
-# shrinks by SMALL_SPACING_SCALE, never to nothing, so blocks stay distinct.
+# stops its fitting search at MIN_TABLE_FONT_SIZE. Code shrinks by the same
+# factor as prose, so a command keeps its size beside the step that runs it.
+# The space between blocks shrinks by SMALL_SPACING_SCALE, never to nothing,
+# so blocks stay distinct.
 SMALL_TEXT_SHRINK = 1.5
 SMALL_TABLE_SHRINK = 1.5
 SMALL_SPACING_SCALE = 0.5
@@ -1179,8 +1186,8 @@ _SMALL_TABLE_STYLES = ("table_cell", "table_header")
 def small_styles(styles: dict[str, ParagraphStyle]) -> dict[str, ParagraphStyle]:
     """Copies of the prose and table styles for a `<small>` region.
 
-    Headings and code keep their size. Copies keep their names, so a caption
-    inside the region is still recognized as one.
+    Headings keep their size. Copies keep their names, so a caption inside
+    the region is still recognized as one.
     """
     shrunk = dict(styles)
     for keys, points, leading_points in (
@@ -1193,6 +1200,11 @@ def small_styles(styles: dict[str, ParagraphStyle]) -> dict[str, ParagraphStyle]
             style.leading = styles[key].leading - leading_points
             shrunk[key] = style
     shrunk["body"].spaceAfter = styles["body"].spaceAfter * SMALL_SPACING_SCALE
+    code = copy.copy(styles["code"])
+    factor = shrunk["body"].fontSize / styles["body"].fontSize
+    code.fontSize = max(MIN_CODE_FONT_SIZE, styles["code"].fontSize * factor)
+    code.leading = styles["code"].leading * (code.fontSize / styles["code"].fontSize)
+    shrunk["code"] = code
     return shrunk
 
 
