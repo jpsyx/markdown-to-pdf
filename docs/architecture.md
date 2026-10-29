@@ -118,8 +118,11 @@ absolute checkout path and can be run directly by anyone.
   blockquote straight after a diagram or an image is parsed as a document of
   its own, against `small_styles`, and set in a shaded single-cell table. It
   keeps its source in `_figure_caption_source`, so `_shrink_caption` rebuilds
-  it at a smaller scale rather than editing its flowables. Grouping treats the
-  box as the diagram's whole explanation, and keeps an image with its box.
+  it at a smaller scale rather than editing its flowables. Inside the box a
+  wholly bold paragraph becomes a small capitals label (`_caption_label_style`)
+  and a table is parsed without borders, with tightened padding. Grouping
+  treats the box as the diagram's whole explanation, and keeps an image with
+  its box.
 - **Code wrapping** (`code_columns`, `_segment_code_line`, `wrap_code_line`,
   `wrap_code_markup`): ReportLab's `Preformatted`/`XPreformatted` do not wrap,
   so a long line overflowed the frame and its tail was lost. Lines are broken

@@ -1813,9 +1813,9 @@ class FigureCaptionBox(unittest.TestCase):
             ">\n"
             "> **Diagram key**\n"
             ">\n"
-            "> | Term | Meaning |\n"
+            "> | | |\n"
             "> | --- | --- |\n"
-            + "".join(f"> | term {n} | What term {n} means in this drawing. |\n" for n in range(rows))
+            + "".join(f"> | **term {n}** | What term {n} means in this drawing. |\n" for n in range(rows))
         )
 
     def box(self, markdown):
@@ -1835,15 +1835,43 @@ class FigureCaptionBox(unittest.TestCase):
         box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
         caption, label, table = self.contents(box)
         self.assertEqual(caption.text.strip(), "<i>What to notice here.</i>")
-        self.assertEqual(label.text.strip(), "<b>Diagram key</b>")
+        self.assertIn("Diagram key", label.text)
         self.assertIsInstance(table, main._ReadableTable)
-        self.assertEqual(len(table._cellvalues), 3)
+        # The empty header row is omitted, leaving one row per term.
+        self.assertEqual(len(table._cellvalues), 2)
 
     def test_the_box_is_set_a_size_smaller(self):
         box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
         caption, _label, table = self.contents(box)
         self.assertEqual(caption.style.fontSize, 9.5)
-        self.assertEqual(table._cellvalues[1][1].style.fontSize, 9.0)
+        self.assertEqual(table._cellvalues[0][1].style.fontSize, 9.0)
+
+    def test_a_bold_line_is_a_small_capitals_label(self):
+        box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
+        caption, label, _table = self.contents(box)
+        self.assertEqual(label.style.textTransform, "uppercase")
+        self.assertLess(label.style.fontSize, caption.style.fontSize - 1)
+        self.assertEqual(label.style.fontName, main.HEADING_FONT_BOLD)
+
+    def test_the_label_sits_tight_between_the_caption_and_the_key(self):
+        box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
+        caption, label, table = self.contents(box)
+        self.assertLessEqual(caption.getSpaceAfter(), 6)
+        self.assertEqual(label.getSpaceBefore(), 0)
+        self.assertLessEqual(label.getSpaceAfter(), 3)
+        self.assertEqual(table.getSpaceBefore(), 0)
+
+    def test_the_key_table_draws_no_lines(self):
+        box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
+        table = self.contents(box)[-1]
+        self.assertEqual(table._linecmds, [])
+        self.assertEqual(table._bkgrndcmds, [])
+
+    def test_the_terms_line_up_with_the_caption(self):
+        box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
+        table = self.contents(box)[-1]
+        self.assertEqual(table._cellStyles[0][0].leftPadding, 0)
+        self.assertGreater(table._cellStyles[0][0].rightPadding, 0)
 
     def test_the_box_is_shaded_and_fits_the_text_block(self):
         box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
@@ -1858,9 +1886,8 @@ class FigureCaptionBox(unittest.TestCase):
     def test_the_key_table_is_tighter_than_a_body_table(self):
         box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
         table = self.contents(box)[-1]
-        padding = [c for c in table._cellStyles[1][1].__dict__.items() if c[0] == "topPadding"]
-        self.assertEqual(padding, [("topPadding", main.CAPTION_TABLE_PADDING)])
-        self.assertLess(main.CAPTION_TABLE_PADDING, 6)
+        self.assertEqual(table._cellStyles[0][1].topPadding, main.CAPTION_TABLE_PADDING)
+        self.assertLess(main.CAPTION_TABLE_PADDING, 3)
 
     def test_the_last_block_leaves_no_gap_above_the_box_edge(self):
         for markdown in (self.caption(), "> *Only a caption.*\n"):

@@ -83,7 +83,10 @@ page minus whatever its explanation needs.
 A blockquote straight after a diagram or an image is that figure's caption box.
 Its blocks keep their own structure, so it can hold the caption, a bold label,
 and a table defining the drawing's labels. They print a size smaller, as in a
-`<small>` region, inside a shaded box that stays on the figure's page. When the
+`<small>` region, inside a shaded box that stays on the figure's page. Inside
+the box, a paragraph that is wholly bold prints as a small capitals label, and
+a table is laid out without lines or fills, its first column flush with the
+caption; leave its header cells empty to omit the header row. When the
 box is too tall for the page, its type shrinks before the drawing does, and the
 drawing never drops below a third of the page. GitHub shows the same blockquote
 as an ordinary quote, so nothing is lost there.
@@ -93,9 +96,9 @@ as an ordinary quote, so nothing is lost there.
 >
 > **Diagram key**
 >
-> | Term | Meaning |
+> | | |
 > | --- | --- |
-> | staged | Objects uploaded but not yet visible to viewers. |
+> | **staged** | Objects uploaded but not yet visible to viewers. |
 ```
 
 Standalone local images are embedded in the PDF. Relative paths resolve from

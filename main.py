@@ -33,7 +33,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.13.0"
+__version__ = "0.13.1"
 
 import argparse
 import html
@@ -1255,9 +1255,19 @@ def callout_box(lines: Iterable[str], style: ParagraphStyle) -> Table:
 CAPTION_BOX_FILL = colors.HexColor("#F3F5F8")
 CAPTION_BOX_BORDER = colors.HexColor("#D3DAE2")
 CAPTION_BOX_PADDING = 9.0
-# Cell padding of a table inside a caption box. A key table is a reference
-# list read against the drawing, so it is set tighter than a body table.
-CAPTION_TABLE_PADDING = 3
+# A table inside a caption box is a key: a reference list read against the
+# drawing. It is laid out as a table but drawn without lines or fills, set
+# tighter than a body table, with its first column flush with the caption.
+CAPTION_TABLE_PADDING = 1.5
+CAPTION_COLUMN_GAP = 10.0
+# Space under each paragraph inside a caption box, tighter than body text.
+CAPTION_PARAGRAPH_SPACE = 5.0
+# A paragraph that is wholly bold, such as "Diagram key", labels the block
+# under it, so it prints as a small capitals heading in the heading face.
+CAPTION_LABEL_SHRINK = 2.0
+CAPTION_LABEL_MIN_SIZE = 6.5
+CAPTION_LABEL_COLOR = colors.HexColor("#5B6573")
+_CAPTION_LABEL_RE = re.compile(r"<b>((?:(?!</?b>).)*)</b>", re.S)
 
 
 def _scaled_styles(styles: dict[str, ParagraphStyle], scale: float) -> dict[str, ParagraphStyle]:
@@ -1290,20 +1300,32 @@ def figure_caption_box(
     the box from `_figure_caption_source` to do that.
     """
     inner_styles = _scaled_styles(small_styles(styles), scale)
+    inner_styles["body"] = inner_styles["body"].clone(
+        f"{inner_styles['body'].name}Caption", spaceAfter=CAPTION_PARAGRAPH_SPACE
+    )
     with indented_blocks(2 * CAPTION_BOX_PADDING):
         content = parse_markdown(
-            "\n".join(lines), _styles=inner_styles, **parse_options
+            "\n".join(lines),
+            _styles=inner_styles,
+            **dict(parse_options, table_borders=False),
         )
-    for flowable in content:
-        if isinstance(flowable, _ReadableTable):
+    label_style = _caption_label_style(inner_styles["body"])
+    for index, flowable in enumerate(content):
+        label = _CAPTION_LABEL_RE.fullmatch(str(getattr(flowable, "text", "")).strip())
+        if isinstance(flowable, Paragraph) and label:
+            content[index] = Paragraph(label.group(1), label_style)
+        elif isinstance(flowable, _ReadableTable):
             flowable.setStyle(
                 TableStyle(
                     [
                         ("TOPPADDING", (0, 0), (-1, -1), CAPTION_TABLE_PADDING),
                         ("BOTTOMPADDING", (0, 0), (-1, -1), CAPTION_TABLE_PADDING),
+                        ("LEFTPADDING", (0, 0), (0, -1), 0),
+                        ("RIGHTPADDING", (0, 0), (0, -1), CAPTION_COLUMN_GAP),
                     ]
                 )
             )
+            flowable.spaceBefore = 0
     if content:
         content[-1] = _without_space_after(content[-1])
     box = Table([[content]], colWidths=[block_width()])
@@ -1324,6 +1346,21 @@ def figure_caption_box(
     box.spaceAfter = 14
     box._figure_caption_source = (list(lines), styles, parse_options)
     return box
+
+
+def _caption_label_style(caption: ParagraphStyle) -> ParagraphStyle:
+    """Small capitals in the heading face, tight to the block it labels."""
+    size = max(CAPTION_LABEL_MIN_SIZE, caption.fontSize - CAPTION_LABEL_SHRINK)
+    return caption.clone(
+        f"{caption.name}Label",
+        fontName=HEADING_FONT_BOLD,
+        fontSize=size,
+        leading=size * 1.3,
+        textColor=CAPTION_LABEL_COLOR,
+        textTransform="uppercase",
+        spaceBefore=0,
+        spaceAfter=2,
+    )
 
 
 def _without_space_after(flowable: Flowable) -> Flowable:
