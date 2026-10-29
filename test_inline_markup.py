@@ -1843,7 +1843,7 @@ class FigureCaptionBox(unittest.TestCase):
     def test_the_box_is_set_a_size_smaller(self):
         box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
         caption, _label, table = self.contents(box)
-        self.assertEqual(caption.style.fontSize, 9.5)
+        self.assertEqual(caption.style.fontSize, 9.0)
         self.assertEqual(table._cellvalues[0][1].style.fontSize, 9.0)
 
     def test_a_bold_line_is_a_small_capitals_label(self):
@@ -1920,7 +1920,7 @@ class FigureCaptionBox(unittest.TestCase):
         self.assertGreaterEqual(
             image.drawHeight, main.MIN_DIAGRAM_HEIGHT_FRACTION * main.CONTENT_HEIGHT
         )
-        self.assertLess(self.contents(shrunk)[0].style.fontSize, 9.5)
+        self.assertLess(self.contents(shrunk)[0].style.fontSize, 9.0)
 
     def test_an_image_keeps_its_caption_box_on_its_page(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2237,18 +2237,72 @@ class SmallBlock(unittest.TestCase):
         for word in ("Before.", "Inside.", "After.", "item"):
             self.assertIn(word, texts)
 
-    def test_paragraphs_and_lists_render_a_point_smaller(self):
+    def test_paragraphs_and_lists_match_the_small_table_size(self):
         story = main.parse_markdown("<small>\n\nInside.\n\n- item\n\n</small>\n\nAfter.\n")
         inside, items, after = story
-        self.assertEqual(inside.style.fontSize, 9.5)
-        self.assertEqual(_paragraphs(items)[0].style.fontSize, 9.5)
+        self.assertEqual(inside.style.fontSize, 9.0)
+        self.assertEqual(_paragraphs(items)[0].style.fontSize, 9.0)
         self.assertEqual(after.style.fontSize, 10.5)
+
+    STEPS = (
+        "Intro paragraph.\n\n"
+        "1. First step.\n\n"
+        "   ```sh\n   pnpm db:reset\n   ```\n\n"
+        "2. Second step.\n\n"
+        "   > Literal text\n\n"
+        "```sh\npnpm dev\n```\n\n"
+        "Closing paragraph.\n"
+    )
+
+    def _spacings(self, flowable):
+        """(spaceBefore, spaceAfter) of every non-paragraph block, nested ones included."""
+        found = []
+        if not isinstance(flowable, Paragraph):
+            found.append((flowable.getSpaceBefore(), flowable.getSpaceAfter()))
+        for child in main._stored_children(flowable):
+            found.extend(self._spacings(child))
+        return found
+
+    def test_spacing_is_tighter_but_never_removed(self):
+        normal = main.parse_markdown(self.STEPS)
+        small = main.parse_markdown(f"<small>\n\n{self.STEPS}\n</small>\n")
+        self.assertEqual(len(normal), len(small))
+        # Paragraph spacing comes from the style.
+        self.assertLess(small[0].style.spaceAfter, normal[0].style.spaceAfter)
+        self.assertGreater(small[0].style.spaceAfter, 0)
+        # Every other block, nested in a list item or not, keeps some space.
+        pairs = list(zip(
+            [s for f in normal for s in self._spacings(f)],
+            [s for f in small for s in self._spacings(f)],
+        ))
+        self.assertTrue(pairs)
+        for (normal_before, normal_after), (small_before, small_after) in pairs:
+            self.assertLessEqual(small_before, normal_before)
+            self.assertLessEqual(small_after, normal_after)
+            self.assertEqual(small_before > 0, normal_before > 0)
+            self.assertEqual(small_after > 0, normal_after > 0)
+        self.assertTrue(any(s < n for (n, _), (s, _) in pairs) or any(
+            s < n for (_, n), (_, s) in pairs))
+
+    def test_list_numbers_and_bullets_match_their_text(self):
+        for marker in ("1.", "-"):
+            with self.subTest(marker=marker):
+                normal, small = (
+                    main.parse_markdown(markdown)[0]
+                    for markdown in (f"{marker} item\n", f"<small>\n{marker} item\n</small>\n")
+                )
+                self.assertEqual(normal._bulletFontSize, 10.5)
+                self.assertEqual(small._bulletFontSize, 9.0)
+
+    def test_spacing_outside_the_region_is_unchanged(self):
+        story = main.parse_markdown(f"<small>\n\nInside.\n\n</small>\n\n{self.STEPS}")
+        self.assertEqual(story[1].style.spaceAfter, 12)
 
     def test_unclosed_region_runs_to_the_end(self):
         story = main.parse_markdown(f"Before.\n\n<small>\n\nInside.\n\n{self.TABLE}")
         before, inside, table = story
         self.assertEqual(before.style.fontSize, 10.5)
-        self.assertEqual(inside.style.fontSize, 9.5)
+        self.assertEqual(inside.style.fontSize, 9.0)
         self.assertEqual(self.cell_size(table), 9.0)
 
     def test_wrapped_table_keeps_the_readable_floor(self):

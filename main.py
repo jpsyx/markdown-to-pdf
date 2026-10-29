@@ -33,7 +33,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.14.0"
+__version__ = "0.14.1"
 
 import argparse
 import html
@@ -1164,12 +1164,14 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
     }
 
 
-# A `<small>` ... `</small>` region on lines of their own (typically a
-# glossary table) reads a little smaller but stays readable. Prose drops a
-# point; a table starts its fitting search 1.5 pt lower and still stops at
-# MIN_TABLE_FONT_SIZE. Leading shrinks along the same curve `_fit_table` uses.
-SMALL_TEXT_SHRINK = 1.0
+# A `<small>` ... `</small>` region on lines of their own (a glossary table,
+# or steps a reader follows rather than studies) reads smaller but stays
+# readable. Prose and tables both drop 1.5 pt, so the two match; a table still
+# stops its fitting search at MIN_TABLE_FONT_SIZE. The space between blocks
+# shrinks by SMALL_SPACING_SCALE, never to nothing, so blocks stay distinct.
+SMALL_TEXT_SHRINK = 1.5
 SMALL_TABLE_SHRINK = 1.5
+SMALL_SPACING_SCALE = 0.5
 _SMALL_TEXT_STYLES = ("body", "bullet", "quote_plain", "callout", "scheduled")
 _SMALL_TABLE_STYLES = ("table_cell", "table_header")
 
@@ -1190,7 +1192,33 @@ def small_styles(styles: dict[str, ParagraphStyle]) -> dict[str, ParagraphStyle]
             style.fontSize = styles[key].fontSize - points
             style.leading = styles[key].leading - leading_points
             shrunk[key] = style
+    shrunk["body"].spaceAfter = styles["body"].spaceAfter * SMALL_SPACING_SCALE
     return shrunk
+
+
+def _tighten_spacing(flowables: Iterable[Flowable]) -> None:
+    """Scale the space around each block of a `<small>` region, nested blocks
+    included. Paragraphs are skipped: their spacing comes from the region's
+    styles, which `small_styles` already tightened."""
+    for flowable in flowables:
+        if not isinstance(flowable, Paragraph):
+            for attribute in ("spaceBefore", "spaceAfter"):
+                value = getattr(flowable, attribute, 0)
+                if isinstance(value, (int, float)) and value > 0:
+                    setattr(flowable, attribute, value * SMALL_SPACING_SCALE)
+        _tighten_spacing(_stored_children(flowable))
+
+
+def _stored_children(flowable: Flowable) -> list[Flowable]:
+    """The flowables a container holds, read from its attributes.
+
+    `ListFlowable._content` is a property that builds the list's bullets and
+    deletes its items, so it is never touched before the document is built.
+    A list keeps its items in `_flowables`, a list item likewise, and
+    `KeepTogether` its children in `_content`.
+    """
+    stored = vars(flowable)
+    return stored.get("_flowables") or stored.get("_content") or []
 
 
 def _hang_leading_emoji(text: str, style: ParagraphStyle) -> ParagraphStyle:
@@ -2694,7 +2722,7 @@ def flush_bullets(
                     item_content(index, paragraph(f"{number}. {text}", styles["bullet"]), 22),
                     leftIndent=22,
                     bulletFontName=checkbox_bullet_font,
-                    bulletFontSize=10.5,
+                    bulletFontSize=styles["bullet"].fontSize,
                     bulletColor=BODY_COLOR,
                     value=glyph,
                 )
@@ -2705,7 +2733,7 @@ def flush_bullets(
                 bulletType="bullet",  # per-item `value=` provides the actual bullet
                 leftIndent=22,
                 bulletFontName="Helvetica",
-                bulletFontSize=10.5,
+                bulletFontSize=styles["bullet"].fontSize,
                 bulletColor=BODY_COLOR,
                 spaceBefore=0,
                 spaceAfter=4,
@@ -2727,7 +2755,7 @@ def flush_bullets(
         item_kwargs: dict = {
             "leftIndent": 18,
             "bulletFontName": "Helvetica" if ordered else BULLET_FONT,
-            "bulletFontSize": 10.5,
+            "bulletFontSize": styles["bullet"].fontSize,
             "bulletColor": BODY_COLOR,
         }
         display_text = text
@@ -2754,7 +2782,7 @@ def flush_bullets(
         # Unordered lists draw `•` from this font, so it must be the one that
         # encodes the bullet at a code every extractor can decode.
         "bulletFontName": "Helvetica" if ordered else BULLET_FONT,
-        "bulletFontSize": 10.5,
+        "bulletFontSize": styles["bullet"].fontSize,
         "bulletColor": BODY_COLOR,
         "spaceBefore": 0,
         "spaceAfter": 12,
@@ -2905,6 +2933,8 @@ def parse_markdown(
     # Story length just after a diagram or an image, so a quote that follows
     # it with nothing in between is read as that figure's caption.
     figure_ends_at = -1
+    # Story length where an open `<small>` region began.
+    small_from: int | None = None
 
     def render_item_blocks(lines: list[str], indent: float) -> list[Flowable]:
         # An item's paragraphs keep the list's tight spacing.
@@ -3008,7 +3038,14 @@ def parse_markdown(
         # to the end of the document.
         if stripped.lower() in ("<small>", "</small>"):
             flush_all()
-            styles = base_styles if stripped.startswith("</") else small_styles(base_styles)
+            if stripped.startswith("</"):
+                styles = base_styles
+                if small_from is not None:
+                    _tighten_spacing(story[small_from:])
+                small_from = None
+            else:
+                styles = small_styles(base_styles)
+                small_from = len(story) if small_from is None else small_from
             i += 1
             continue
 
@@ -3154,6 +3191,8 @@ def parse_markdown(
         i += 1
 
     flush_all()
+    if small_from is not None:
+        _tighten_spacing(story[small_from:])
     return story
 
 
