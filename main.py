@@ -33,7 +33,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 import argparse
 import html
@@ -1248,6 +1248,103 @@ def callout_box(lines: Iterable[str], style: ParagraphStyle) -> Table:
     return table
 
 
+# A blockquote straight after a diagram or an image is that figure's caption.
+# Its blocks print a size smaller, as in a `<small>` region, inside a shaded
+# box, so the caption and any key table under it read as part of the figure
+# rather than as the next paragraph of prose.
+CAPTION_BOX_FILL = colors.HexColor("#F3F5F8")
+CAPTION_BOX_BORDER = colors.HexColor("#D3DAE2")
+CAPTION_BOX_PADDING = 9.0
+# Cell padding of a table inside a caption box. A key table is a reference
+# list read against the drawing, so it is set tighter than a body table.
+CAPTION_TABLE_PADDING = 3
+
+
+def _scaled_styles(styles: dict[str, ParagraphStyle], scale: float) -> dict[str, ParagraphStyle]:
+    """Copies of the prose and table styles with their type scaled by `scale`,
+    never below MIN_CAPTION_FONT_SIZE. A scale of 1 returns `styles` itself."""
+    if scale >= 1.0:
+        return styles
+    scaled = dict(styles)
+    for key in (*_SMALL_TEXT_STYLES, *_SMALL_TABLE_STYLES):
+        style = copy.copy(styles[key])
+        size = max(MIN_CAPTION_FONT_SIZE, style.fontSize * scale)
+        style.leading = style.leading * (size / style.fontSize)
+        style.fontSize = size
+        scaled[key] = style
+    return scaled
+
+
+def figure_caption_box(
+    lines: list[str],
+    styles: dict[str, ParagraphStyle],
+    *,
+    scale: float = 1.0,
+    **parse_options,
+) -> Table:
+    """A figure's caption: the quote's own blocks, smaller, in a shaded box.
+
+    `lines` are the quote's lines with their `>` prefixes removed, so the
+    caption can hold several paragraphs and a table. `scale` shrinks the type
+    further when the figure needs the room; `group_diagram_figures` rebuilds
+    the box from `_figure_caption_source` to do that.
+    """
+    inner_styles = _scaled_styles(small_styles(styles), scale)
+    with indented_blocks(2 * CAPTION_BOX_PADDING):
+        content = parse_markdown(
+            "\n".join(lines), _styles=inner_styles, **parse_options
+        )
+    for flowable in content:
+        if isinstance(flowable, _ReadableTable):
+            flowable.setStyle(
+                TableStyle(
+                    [
+                        ("TOPPADDING", (0, 0), (-1, -1), CAPTION_TABLE_PADDING),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), CAPTION_TABLE_PADDING),
+                    ]
+                )
+            )
+    if content:
+        content[-1] = _without_space_after(content[-1])
+    box = Table([[content]], colWidths=[block_width()])
+    box.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), CAPTION_BOX_FILL),
+                ("BOX", (0, 0), (-1, -1), 0.75, CAPTION_BOX_BORDER),
+                ("LEFTPADDING", (0, 0), (-1, -1), CAPTION_BOX_PADDING),
+                ("RIGHTPADDING", (0, 0), (-1, -1), CAPTION_BOX_PADDING),
+                ("TOPPADDING", (0, 0), (-1, -1), CAPTION_BOX_PADDING),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), CAPTION_BOX_PADDING),
+            ]
+        )
+    )
+    box.hAlign = "LEFT"
+    box.spaceBefore = 0
+    box.spaceAfter = 14
+    box._figure_caption_source = (list(lines), styles, parse_options)
+    return box
+
+
+def _without_space_after(flowable: Flowable) -> Flowable:
+    """The flowable with no space after it, so a box's padding is even.
+
+    A Paragraph reads its spacing from its style, which is shared, so it is
+    rebuilt on a copy rather than changed in place.
+    """
+    if isinstance(flowable, Paragraph):
+        style = copy.copy(flowable.style)
+        style.spaceAfter = 0
+        return Paragraph(flowable.text, style)
+    flowable.spaceAfter = 0
+    return flowable
+
+
+def is_figure_caption_box(flowable: Flowable) -> bool:
+    """Whether a flowable is a figure's caption box."""
+    return hasattr(flowable, "_figure_caption_source")
+
+
 # Pygments style whose token colors are read for highlighting. `default` is
 # built for a light background, which is what CODE_FILL is.
 HIGHLIGHT_STYLE = "default"
@@ -1852,6 +1949,12 @@ def _shrink_caption(flowables: list[Flowable], scale: float) -> list[Flowable]:
     """
     rebuilt: list[Flowable] = []
     for flowable in flowables:
+        if is_figure_caption_box(flowable):
+            lines, styles, parse_options = flowable._figure_caption_source
+            rebuilt.append(
+                figure_caption_box(lines, styles, scale=scale, **parse_options)
+            )
+            continue
         style = getattr(flowable, "style", None)
         if not isinstance(flowable, Paragraph) or style is None:
             rebuilt.append(flowable)
@@ -1879,7 +1982,13 @@ def group_diagram_figures(
     while index < len(story):
         flowable = story[index]
         natural = getattr(flowable, "_mermaid_natural_size", None)
+        boxed = index + 1 < len(story) and is_figure_caption_box(story[index + 1])
         if natural is None:
+            # An image is not re-fitted, but it keeps its caption box.
+            if boxed and isinstance(flowable, Image):
+                grouped.append(KeepTogether([flowable, story[index + 1]]))
+                index += 2
+                continue
             grouped.append(flowable)
             index += 1
             continue
@@ -1888,7 +1997,10 @@ def group_diagram_figures(
         # diagram ends the search, and so does running out of lookahead.
         explanation: list[Flowable] = []
         cursor = index + 1
-        while cursor < len(story) and len(explanation) < _FIGURE_LOOKAHEAD:
+        if boxed:
+            explanation = [story[index + 1]]
+            cursor = index + 2
+        while not boxed and cursor < len(story) and len(explanation) < _FIGURE_LOOKAHEAD:
             candidate = story[cursor]
             if not _may_explain_a_diagram(candidate):
                 explanation = []
@@ -1898,8 +2010,9 @@ def group_diagram_figures(
             if is_diagram_caption(candidate):
                 break
         else:
-            explanation = []
-        if explanation and not is_diagram_caption(explanation[-1]):
+            if not boxed:
+                explanation = []
+        if explanation and not boxed and not is_diagram_caption(explanation[-1]):
             explanation = []
 
         # keepWithNext alone cannot fit a heading plus a full-page diagram.
@@ -1931,6 +2044,10 @@ def group_diagram_figures(
             explanation = _shrink_caption(explanation, room / max(reserved, 1.0))
             reserved = heading_height + _measure(explanation) + own_spacing + FIGURE_SLACK
         fit = mermaid_fit(width, height, reserved_height=reserved)
+        # An explanation too long to shrink into the room left over must not
+        # crush the drawing it explains. The drawing keeps its floor, and the
+        # group, now taller than a page, lets the explanation run on.
+        fit = max(fit, min(floor / height, CONTENT_WIDTH / width))
         flowable.drawWidth = width * fit
         flowable.drawHeight = height * fit
 
@@ -2705,6 +2822,9 @@ def _next_item_continues_list(raw_lines: Sequence[str], index: int, kind: str) -
     return re.match(r"^[-*+]\s+\S", stripped) is not None
 
 
+_QUOTE_PREFIX_RE = re.compile(r"^\s*> ?")
+
+
 def parse_markdown(
     markdown: str,
     *,
@@ -2733,6 +2853,9 @@ def parse_markdown(
     code_language: str = ""
     code_highlight: frozenset[int] = frozenset()
     in_code_block = False
+    # Story length just after a diagram or an image, so a quote that follows
+    # it with nothing in between is read as that figure's caption.
+    figure_ends_at = -1
 
     def render_item_blocks(lines: list[str], indent: float) -> list[Flowable]:
         # An item's paragraphs keep the list's tight spacing.
@@ -2781,6 +2904,7 @@ def parse_markdown(
                             code_buffer, styles["code"], black_text=black_text
                         )
                     )
+                    figure_ends_at = len(story)
                 else:
                     story.append(
                         code_block(
@@ -2829,6 +2953,23 @@ def parse_markdown(
             flush_all()
             styles = base_styles if stripped.startswith("</") else small_styles(base_styles)
             i += 1
+            continue
+
+        if stripped.startswith(">") and not quote_buffer and figure_ends_at == len(story):
+            caption_lines: list[str] = []
+            while i < len(raw_lines) and raw_lines[i].strip().startswith(">"):
+                caption_lines.append(_QUOTE_PREFIX_RE.sub("", raw_lines[i], count=1))
+                i += 1
+            story.append(
+                figure_caption_box(
+                    caption_lines,
+                    styles,
+                    table_borders=table_borders,
+                    compact_tables=compact_tables,
+                    agenda_tables=agenda_tables,
+                    black_text=black_text,
+                )
+            )
             continue
 
         if stripped.startswith(">"):
@@ -2931,6 +3072,7 @@ def parse_markdown(
         elif image_match:
             flush_paragraph(paragraph_buffer, story, styles)
             story.append(local_image_block(image_match.group(2), _LINK_BASE_DIR))
+            figure_ends_at = len(story)
         elif stripped.startswith("###### "):
             flush_paragraph(paragraph_buffer, story, styles)
             story.append(paragraph(stripped[7:].strip(), styles["h6"]))

@@ -80,6 +80,24 @@ break. The italic paragraph after a fence is read as its caption, and a `Where:`
 glossary between the two joins the same figure, so the drawing is sized to the
 page minus whatever its explanation needs.
 
+A blockquote straight after a diagram or an image is that figure's caption box.
+Its blocks keep their own structure, so it can hold the caption, a bold label,
+and a table defining the drawing's labels. They print a size smaller, as in a
+`<small>` region, inside a shaded box that stays on the figure's page. When the
+box is too tall for the page, its type shrinks before the drawing does, and the
+drawing never drops below a third of the page. GitHub shows the same blockquote
+as an ordinary quote, so nothing is lost there.
+
+```markdown
+> *What to notice in the diagram.*
+>
+> **Diagram key**
+>
+> | Term | Meaning |
+> | --- | --- |
+> | staged | Objects uploaded but not yet visible to viewers. |
+```
+
 Standalone local images are embedded in the PDF. Relative paths resolve from
 the Markdown file's directory, so `![Picker](assets/picker.png)` works from any
 current working directory. Images retain their aspect ratio and shrink to fit

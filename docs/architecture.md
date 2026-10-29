@@ -111,7 +111,15 @@ absolute checkout path and can be run directly by anyone.
   `MIN_DIAGRAM_HEIGHT_FRACTION` the explanation is shrunk instead, by
   rebuilding its paragraphs against a copied style. Preceding headings join
   the group and reserve their own height, even without a caption, preventing
-  heading-only pages before tall diagrams.
+  heading-only pages before tall diagrams. The drawing never drops below that
+  floor: an explanation too long to shrink into the remaining room runs on to
+  the next page instead of crushing the drawing.
+- **Caption boxes** (`figure_caption_box`, `is_figure_caption_box`): a
+  blockquote straight after a diagram or an image is parsed as a document of
+  its own, against `small_styles`, and set in a shaded single-cell table. It
+  keeps its source in `_figure_caption_source`, so `_shrink_caption` rebuilds
+  it at a smaller scale rather than editing its flowables. Grouping treats the
+  box as the diagram's whole explanation, and keeps an image with its box.
 - **Code wrapping** (`code_columns`, `_segment_code_line`, `wrap_code_line`,
   `wrap_code_markup`): ReportLab's `Preformatted`/`XPreformatted` do not wrap,
   so a long line overflowed the frame and its tail was lost. Lines are broken

@@ -1795,6 +1795,120 @@ class DiagramAndCaptionShareOnePage(unittest.TestCase):
 
 
 
+class FigureCaptionBox(unittest.TestCase):
+    """A blockquote straight after a diagram or an image is that figure's
+    caption: its paragraphs and its key table print a size smaller, in a
+    shaded box, and the box stays on the figure's page.
+
+    A caption and a `Where:` list set as body text read as the next paragraph
+    of prose rather than as part of the figure above them.
+    """
+
+    DIAGRAM = "```mermaid\nflowchart TD\n  a[\"alpha\"] --> b[\"beta\"]\n```"
+
+    @staticmethod
+    def caption(rows=2):
+        return (
+            "> *What to notice here.*\n"
+            ">\n"
+            "> **Diagram key**\n"
+            ">\n"
+            "> | Term | Meaning |\n"
+            "> | --- | --- |\n"
+            + "".join(f"> | term {n} | What term {n} means in this drawing. |\n" for n in range(rows))
+        )
+
+    def box(self, markdown):
+        story = main.parse_markdown(markdown)
+        boxes = [f for f in story if main.is_figure_caption_box(f)]
+        self.assertEqual(len(boxes), 1)
+        return boxes[0], story
+
+    def contents(self, box):
+        return box._cellvalues[0][0]
+
+    def test_a_quote_after_a_diagram_becomes_its_caption_box(self):
+        box, story = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
+        self.assertIs(story[-1], box)
+
+    def test_the_box_keeps_the_caption_first_then_the_key_table(self):
+        box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
+        caption, label, table = self.contents(box)
+        self.assertEqual(caption.text.strip(), "<i>What to notice here.</i>")
+        self.assertEqual(label.text.strip(), "<b>Diagram key</b>")
+        self.assertIsInstance(table, main._ReadableTable)
+        self.assertEqual(len(table._cellvalues), 3)
+
+    def test_the_box_is_set_a_size_smaller(self):
+        box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
+        caption, _label, table = self.contents(box)
+        self.assertEqual(caption.style.fontSize, 9.5)
+        self.assertEqual(table._cellvalues[1][1].style.fontSize, 9.0)
+
+    def test_the_box_is_shaded_and_fits_the_text_block(self):
+        box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
+        commands = {command[0] for command in box._bkgrndcmds} | {
+            command[0] for command in box._linecmds
+        }
+        self.assertIn("BOX", commands)
+        self.assertTrue(box._bkgrndcmds)
+        width, _height = box.wrap(main.CONTENT_WIDTH, main.CONTENT_HEIGHT)
+        self.assertLessEqual(width, main.CONTENT_WIDTH + 0.01)
+
+    def test_the_key_table_is_tighter_than_a_body_table(self):
+        box, _ = self.box(f"{self.DIAGRAM}\n\n{self.caption()}")
+        table = self.contents(box)[-1]
+        padding = [c for c in table._cellStyles[1][1].__dict__.items() if c[0] == "topPadding"]
+        self.assertEqual(padding, [("topPadding", main.CAPTION_TABLE_PADDING)])
+        self.assertLess(main.CAPTION_TABLE_PADDING, 6)
+
+    def test_the_last_block_leaves_no_gap_above_the_box_edge(self):
+        for markdown in (self.caption(), "> *Only a caption.*\n"):
+            with self.subTest(markdown=markdown):
+                box, _ = self.box(f"{self.DIAGRAM}\n\n{markdown}")
+                last = self.contents(box)[-1]
+                self.assertEqual(last.getSpaceAfter(), 0)
+
+    def test_a_quote_after_prose_is_an_ordinary_callout(self):
+        story = main.parse_markdown(f"{self.DIAGRAM}\n\nProse.\n\n> one\n> two\n")
+        self.assertFalse(any(main.is_figure_caption_box(f) for f in story))
+
+    def test_a_diagram_and_its_caption_box_become_one_unit(self):
+        box, story = self.box(f"{self.DIAGRAM}\n\n{self.caption()}\nProse after.\n")
+        grouped = main.group_diagram_figures(story, main.make_styles())
+        self.assertEqual(len(grouped), 2)
+        self.assertIsInstance(grouped[0], KeepTogether)
+        self.assertIs(grouped[0]._content[-1], box)
+
+    def test_the_whole_figure_fits_one_page(self):
+        _box, story = self.box(f"{self.DIAGRAM}\n\n{self.caption(rows=8)}")
+        grouped = main.group_diagram_figures(story, main.make_styles())
+        height = main._measure(grouped[0]._content)
+        self.assertLessEqual(height, main.CONTENT_HEIGHT - main.FIGURE_SLACK + 0.5)
+
+    def test_a_tall_box_shrinks_before_the_diagram_does(self):
+        _box, story = self.box(f"{self.DIAGRAM}\n\n{self.caption(rows=30)}")
+        grouped = main.group_diagram_figures(story, main.make_styles())
+        image, shrunk = grouped[0]._content
+        self.assertGreaterEqual(
+            image.drawHeight, main.MIN_DIAGRAM_HEIGHT_FRACTION * main.CONTENT_HEIGHT
+        )
+        self.assertLess(self.contents(shrunk)[0].style.fontSize, 9.5)
+
+    def test_an_image_keeps_its_caption_box_on_its_page(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _write_test_png(Path(directory) / "shot.png", 1000, 500)
+            main._LINK_BASE_DIR = directory
+            try:
+                box, story = self.box(f"![Shot](shot.png)\n\n{self.caption()}")
+            finally:
+                main._LINK_BASE_DIR = None
+        grouped = main.group_diagram_figures(story, main.make_styles())
+        self.assertEqual(len(grouped), 1)
+        self.assertIsInstance(grouped[0], KeepTogether)
+        self.assertIs(grouped[0]._content[-1], box)
+
+
 class _RecordingCanvas:
     """Records only what the footer needs, so the drawing code can be tested
     without a real page: a canvas here is a sink for two or three calls."""
