@@ -33,7 +33,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.14.2"
+__version__ = "0.14.3"
 
 import argparse
 import html
@@ -1675,6 +1675,12 @@ def wrap_code_markup(markup: str, max_chars: int) -> list[str]:
     return pieces
 
 
+# The space above a code block's first line and below its last, in ems of the
+# block's own type, so a block set smaller is not padded as if it were not.
+# At the default 8.5 pt it comes to 8 pt.
+CODE_VERTICAL_PADDING_EM = 8 / 8.5
+
+
 def _highlighted_code_table(
     lines: list[str],
     language: str,
@@ -1724,8 +1730,9 @@ def _highlighted_code_table(
             )
     # Breathing room at the block's edges only, so the lines stay on the
     # monospace grid in between.
-    commands.append(("TOPPADDING", (0, 0), (-1, 0), 8))
-    commands.append(("BOTTOMPADDING", (0, len(rows) - 1), (-1, len(rows) - 1), 8))
+    padding = style.fontSize * CODE_VERTICAL_PADDING_EM
+    commands.append(("TOPPADDING", (0, 0), (-1, 0), padding))
+    commands.append(("BOTTOMPADDING", (0, len(rows) - 1), (-1, len(rows) - 1), padding))
     table = Table(rows, colWidths=[width])
     table.setStyle(TableStyle(commands))
     return table
@@ -1781,14 +1788,15 @@ def code_block(
         # The block is one row for its background and padding. Allow splitting
         # inside that row so Preformatted/XPreformatted can paginate long code.
         table = Table([[cell]], colWidths=[width], splitInRow=1)
+        padding = style.fontSize * CODE_VERTICAL_PADDING_EM
         table.setStyle(
             TableStyle(
                 [
                     ("BACKGROUND", (0, 0), (-1, -1), CODE_FILL),
                     ("LEFTPADDING", (0, 0), (-1, -1), 10),
                     ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                    ("TOPPADDING", (0, 0), (-1, -1), 8),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), padding),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
                 ]
             )
         )

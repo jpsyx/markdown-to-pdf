@@ -2308,6 +2308,21 @@ class SmallBlock(unittest.TestCase):
             self.assertAlmostEqual(small_leading, normal_leading * factor)
         self.assertEqual(small_code[-1], normal_code[0])
 
+    def test_code_padding_shrinks_with_its_type(self):
+        fences = ("```\npnpm dev\n```\n", "```sh {1}\npnpm dev\npnpm db:reset\n```\n")
+        for fence in fences:
+            with self.subTest(fence=fence):
+                (normal,) = main.parse_markdown(fence)
+                (small,) = main.parse_markdown(f"<small>\n\n{fence}\n</small>\n")
+                factor = small._cellvalues[0][0].style.fontSize / normal._cellvalues[0][0].style.fontSize
+                self.assertLess(factor, 1)
+                for row in (0, -1):
+                    for attribute in ("topPadding", "bottomPadding"):
+                        normal_padding = getattr(normal._cellStyles[row][0], attribute)
+                        small_padding = getattr(small._cellStyles[row][0], attribute)
+                        self.assertAlmostEqual(small_padding, normal_padding * factor)
+                self.assertEqual(normal._cellStyles[0][0].topPadding, 8)
+
     def test_code_keeps_its_readable_floor(self):
         story = main.parse_markdown("<small>\n\n```\npnpm dev\n```\n", font_shrink=2.0)
         ((size, _leading),) = self._code_sizes(story[0])
