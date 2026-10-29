@@ -1936,6 +1936,58 @@ class FigureCaptionBox(unittest.TestCase):
         self.assertIs(grouped[0]._content[-1], box)
 
 
+class CssPageBreak(unittest.TestCase):
+    """The CSS page-break idiom on an empty div breaks the page.
+
+    Markdown has no page-break syntax. HTML-based converters honor this div,
+    and GitHub strips its style and shows nothing, so it is the portable way
+    for a document to ask for a new page.
+    """
+
+    BREAKS = (
+        '<div style="page-break-before: always"></div>',
+        '<div style="page-break-before: always;"></div>',
+        "<div style='break-before: page'></div>",
+        '<div style="page-break-after: always"></div>',
+        '<div style="break-after:page" />',
+        '<DIV STYLE="page-break-before: always"></DIV>',
+    )
+
+    def test_each_spelling_becomes_a_page_break(self):
+        for line in self.BREAKS:
+            with self.subTest(line=line):
+                story = main.parse_markdown(f"Before.\n\n{line}\n\nAfter.\n")
+                self.assertEqual(len(story), 3)
+                self.assertIsInstance(story[1], main.PageBreak)
+
+    def test_the_line_needs_no_blank_lines_around_it(self):
+        story = main.parse_markdown(f"Before.\n{self.BREAKS[0]}\n## Heading\n")
+        before, page_break, heading = story
+        self.assertEqual(before.text, "Before.")
+        self.assertIsInstance(page_break, main.PageBreak)
+        self.assertEqual(heading.text, "Heading")
+
+    def test_a_div_with_another_style_is_not_a_break(self):
+        story = main.parse_markdown('Before.\n\n<div style="color: red"></div>\n\nAfter.\n')
+        self.assertFalse(any(isinstance(f, main.PageBreak) for f in story))
+
+    def _pages(self, markdown):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "doc.md"
+            source.write_text(markdown)
+            output = Path(directory) / "doc.pdf"
+            with contextlib.redirect_stdout(io.StringIO()):
+                main.convert_markdown_to_pdf(source, output)
+            return len(re.findall(rb"/Type\s*/Page\b", output.read_bytes()))
+
+    def test_the_heading_after_a_break_starts_a_new_page(self):
+        self.assertEqual(self._pages(f"Intro.\n\n{self.BREAKS[0]}\n\n## Appendix A\n"), 2)
+
+    def test_a_break_at_the_top_of_a_page_adds_no_blank_page(self):
+        markdown = f"Intro.\n\n{self.BREAKS[0]}\n\n{self.BREAKS[0]}\n\nEnd.\n"
+        self.assertEqual(self._pages(markdown), 2)
+
+
 class _RecordingCanvas:
     """Records only what the footer needs, so the drawing code can be tested
     without a real page: a canvas here is a sink for two or three calls."""

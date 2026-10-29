@@ -33,7 +33,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.13.1"
+__version__ = "0.14.0"
 
 import argparse
 import html
@@ -67,6 +67,8 @@ from reportlab.platypus import (
     Image,
     ListFlowable,
     ListItem,
+    PageBreak,
+    PageBreakIfNotEmpty,
     Paragraph,
     Preformatted,
     SimpleDocTemplate,
@@ -2861,6 +2863,16 @@ def _next_item_continues_list(raw_lines: Sequence[str], index: int, kind: str) -
 
 _QUOTE_PREFIX_RE = re.compile(r"^\s*> ?")
 
+# The CSS page-break idiom on an empty div, alone on its line. Markdown has no
+# page break of its own; HTML-based converters honor this div and GitHub
+# strips its style, so it is the portable way for a document to ask for one.
+_CSS_PAGE_BREAK_RE = re.compile(
+    r"""<div\s+style\s*=\s*(["'])\s*"""
+    r"(?:page-break-(?:before|after)\s*:\s*always|break-(?:before|after)\s*:\s*page)"
+    r"""\s*;?\s*\1\s*(?:/>|>\s*</div>)""",
+    re.IGNORECASE,
+)
+
 
 def parse_markdown(
     markdown: str,
@@ -2980,6 +2992,14 @@ def parse_markdown(
         if not stripped:
             if not (bullet_buffer and _next_item_continues_list(raw_lines, i, bullet_buffer[-1][0])):
                 flush_all()
+            i += 1
+            continue
+
+        # A page break never leaves a blank page: at the top of a page it does
+        # nothing, so two in a row, or one after a full page, cost no paper.
+        if _CSS_PAGE_BREAK_RE.fullmatch(stripped):
+            flush_all()
+            story.append(PageBreakIfNotEmpty())
             i += 1
             continue
 

@@ -41,7 +41,7 @@ hyphens or slashes, and header words stay intact. Headers repeat on subsequent
 pages; ordinary rows stay together, while a row taller than a page can continue
 onto the next page.
 
-Two pieces of raw HTML are understood. An inline `<sup>G4</sup>` renders as a
+Three pieces of raw HTML are understood. An inline `<sup>G4</sup>` renders as a
 small raised superscript wherever text renders, including table cells and
 headings, which suits glossary markers placed right after a term; inside a code
 span or fence it stays literal. A `<small>` line and a `</small>` line, each on
@@ -49,6 +49,11 @@ its own and with or without blank lines around the content, set everything
 between them in smaller type: a table starts its fitting 1.5 points lower
 (still never below 8 points) and prose drops a point. GitHub keeps `<sup>` but
 strips `<small>`, so a wrapped table simply renders at normal size there.
+Markdown has no page break, so the CSS idiom serves as one: a line holding only
+`<div style="page-break-before: always"></div>` (or `page-break-after`,
+`break-before: page`, `break-after: page`) starts a new page, and does nothing
+at the top of a page, so it never leaves a blank one. HTML-based converters
+honor the same line, and GitHub shows nothing.
 
 Fenced code blocks are syntax highlighted when the fence carries a language
 tag (```typescript, ```python, ```sql, ...); an untagged fence renders plain.
