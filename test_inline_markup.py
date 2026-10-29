@@ -1889,5 +1889,281 @@ class PageNumbers(unittest.TestCase):
             self.assertEqual(drawn, [(n + 1, total) for n in range(total)])
 
 
+class HtmlSuperscript(unittest.TestCase):
+    """Raw `<sup>` renders as a superscript instead of printing its tags."""
+
+    def assert_superscript(self, markup, body):
+        self.assertRegex(markup, r"<super [^>]*>" + re.escape(body) + r"</super>")
+        self.assertNotIn("&lt;sup", markup)
+        self.assertNotIn("&lt;/sup", markup)
+
+    def test_marker_after_a_word(self):
+        markup = main.inline_markup("column ID<sup>G4</sup> is permanent")
+        self.assertTrue(markup.startswith("column ID<super "))
+        self.assert_superscript(markup, "G4")
+
+    def test_marker_after_a_code_span(self):
+        markup = main.inline_markup("`QueryColumn`<sup>G7</sup>")
+        self.assertRegex(markup, r"QueryColumn</font><super [^>]*>G7</super>$")
+
+    def test_marker_after_bold_text(self):
+        markup = main.inline_markup("**Column ID**<sup>G1</sup> and *more*")
+        self.assertIn("<b>Column ID</b><super ", markup)
+        self.assert_superscript(markup, "G1")
+        self.assertIn("<i>more</i>", markup)
+
+    def test_content_is_inline_markdown(self):
+        self.assert_superscript(main.inline_markup("x<sup>*G1*</sup>"), "<i>G1</i>")
+
+    def test_superscript_is_smaller_and_raised_relative_to_its_text(self):
+        # Relative sizes keep a marker in proportion inside headings and
+        # shrunken table type alike.
+        tag = re.search(r"<super ([^>]*)>", main.inline_markup("a<sup>1</sup>")).group(1)
+        self.assertRegex(tag, r'size="\d+%"')
+        self.assertRegex(tag, r'rise="\d+%"')
+
+    def test_tag_inside_a_code_span_stays_literal(self):
+        markup = main.inline_markup("`a<sup>b</sup>`")
+        self.assertIn("&lt;sup&gt;b&lt;/sup&gt;", markup)
+        self.assertNotIn("<super", markup)
+
+    def test_unmatched_open_tag_stays_literal(self):
+        markup = main.inline_markup("x<sup>G1 and more")
+        self.assertIn("&lt;sup&gt;G1", markup)
+        self.assertNotIn("<super", markup)
+
+    def test_unmatched_close_tag_stays_literal(self):
+        markup = main.inline_markup("x</sup> y")
+        self.assertIn("&lt;/sup&gt;", markup)
+        self.assertNotIn("<super", markup)
+
+    def test_emphasis_never_crosses_a_superscript_boundary(self):
+        # `*a<sup>b*</sup>` would otherwise emit <i> inside <super> closing
+        # outside it, which ReportLab rejects.
+        markup = main.inline_markup("*a<sup>b*</sup>")
+        Paragraph(markup, main.make_styles()["body"])
+        self.assertNotRegex(markup, r"<super [^>]*>[^<]*</i>")
+
+    def test_marker_inside_a_link_label(self):
+        markup = main.inline_markup("[term<sup>G2</sup>](#glossary)")
+        self.assertRegex(markup, r"<a [^>]*>term<super [^>]*>G2</super></a>")
+
+    def test_renders_in_paragraphs_headings_lists_and_quotes(self):
+        story = main.parse_markdown(
+            "## Heading<sup>G1</sup>\n\n"
+            "Body word<sup>G2</sup>.\n\n"
+            "- item<sup>G3</sup>\n\n"
+            "> quoted<sup>G4</sup>\n"
+        )
+        texts = []
+        for flowable in story:
+            for paragraph in _paragraphs(flowable):
+                texts.append(paragraph.text)
+                paragraph.wrap(main.CONTENT_WIDTH, main.CONTENT_HEIGHT)
+        joined = "\n".join(texts)
+        for marker in ("G1", "G2", "G3", "G4"):
+            self.assertRegex(joined, r"<super [^>]*>" + marker + "</super>")
+        self.assertNotIn("&lt;sup", joined)
+
+    def test_renders_in_table_header_and_body_cells(self):
+        table = main.render_table(
+            ["Term<sup>G1</sup>", "Meaning"],
+            [["column ID<sup>G4</sup>", "`QueryColumn`<sup>G7</sup> words"]],
+            ["LEFT", "LEFT"],
+            main.make_styles(),
+        )
+        cells = [cell.text for row in table._cellvalues for cell in row]
+        self.assertRegex(cells[0], r"<super [^>]*>G1</super>")
+        self.assertRegex(cells[2], r"<super [^>]*>G4</super>")
+        self.assertRegex(cells[3], r"<super [^>]*>G7</super>")
+        table.wrap(main.CONTENT_WIDTH, main.CONTENT_HEIGHT)
+
+    def test_table_fitting_measures_the_rendered_marker_not_its_tags(self):
+        self.assertEqual(main._visible_cell_text("column ID<sup>G4</sup>"), "column IDG4")
+        style = main.make_styles()["table_cell"]
+        rendered = Paragraph(main._table_markup("ID<sup>G12</sup>", 10.5), style)
+        literal = Paragraph("ID&lt;sup&gt;G12&lt;/sup&gt;", style)
+        self.assertLess(rendered.minWidth(), literal.minWidth() / 2)
+
+    def test_fenced_code_keeps_the_tag_literal(self):
+        story = main.parse_markdown("```\nx<sup>1</sup>\n```\n")
+        self.assertIn("x<sup>1</sup>", story[0]._cellvalues[0][0].lines[0])
+
+
+def _paragraphs(flowable):
+    """Every Paragraph inside a flowable, descending into lists and tables."""
+    if isinstance(flowable, Paragraph):
+        return [flowable]
+    found = []
+    for child in getattr(flowable, "_flowables", None) or []:
+        found.extend(_paragraphs(child))
+    for row in getattr(flowable, "_cellvalues", None) or []:
+        for cell in row:
+            for child in cell if isinstance(cell, (list, tuple)) else [cell]:
+                found.extend(_paragraphs(child))
+    return found
+
+
+class SmallBlock(unittest.TestCase):
+    """A `<small>` ... `</small>` region renders its blocks in smaller type."""
+
+    TABLE = (
+        "| Term | Meaning |\n"
+        "| --- | --- |\n"
+        "| **G1** Column ID | A permanent ID the app gives each column. |\n"
+    )
+
+    def tables(self, story):
+        return [f for f in story if isinstance(f, main._ReadableTable)]
+
+    def cell_size(self, table):
+        return table._cellvalues[1][1].style.fontSize
+
+    def test_wrapped_table_starts_one_and_a_half_points_smaller(self):
+        story = main.parse_markdown(
+            f"{self.TABLE}\n<small>\n\n{self.TABLE}\n</small>\n\n{self.TABLE}"
+        )
+        normal, small, after = self.tables(story)
+        self.assertEqual(self.cell_size(normal), 10.5)
+        self.assertEqual(self.cell_size(small), 9.0)
+        self.assertEqual(small._cellvalues[0][0].style.fontSize, 9.0)
+        self.assertEqual(self.cell_size(after), 10.5)
+
+    def test_tag_lines_without_blank_lines(self):
+        story = main.parse_markdown(f"<small>\n{self.TABLE}</small>\nAfter.\n")
+        (small,) = self.tables(story)
+        self.assertEqual(self.cell_size(small), 9.0)
+        self.assertEqual(story[-1].style.fontSize, 10.5)
+
+    def test_tag_lines_never_print(self):
+        story = main.parse_markdown(
+            "Before.\n<small>\nInside.\n</small>\nAfter.\n\n<SMALL>\n\n- item\n\n</SMALL>\n"
+        )
+        texts = "\n".join(p.text for f in story for p in _paragraphs(f))
+        self.assertNotIn("small", texts.lower())
+        for word in ("Before.", "Inside.", "After.", "item"):
+            self.assertIn(word, texts)
+
+    def test_paragraphs_and_lists_render_a_point_smaller(self):
+        story = main.parse_markdown("<small>\n\nInside.\n\n- item\n\n</small>\n\nAfter.\n")
+        inside, items, after = story
+        self.assertEqual(inside.style.fontSize, 9.5)
+        self.assertEqual(_paragraphs(items)[0].style.fontSize, 9.5)
+        self.assertEqual(after.style.fontSize, 10.5)
+
+    def test_unclosed_region_runs_to_the_end(self):
+        story = main.parse_markdown(f"Before.\n\n<small>\n\nInside.\n\n{self.TABLE}")
+        before, inside, table = story
+        self.assertEqual(before.style.fontSize, 10.5)
+        self.assertEqual(inside.style.fontSize, 9.5)
+        self.assertEqual(self.cell_size(table), 9.0)
+
+    def test_wrapped_table_keeps_the_readable_floor(self):
+        story = main.parse_markdown(f"<small>\n\n{self.TABLE}\n</small>\n", font_shrink=2.0)
+        (small,) = self.tables(story)
+        self.assertEqual(self.cell_size(small), main.MIN_TABLE_FONT_SIZE)
+
+    def test_shared_styles_are_not_mutated(self):
+        styles = main.make_styles()
+        small = main.small_styles(styles)
+        self.assertEqual(styles["body"].fontSize, 10.5)
+        self.assertEqual(styles["table_cell"].fontSize, 10.5)
+        self.assertEqual(small["body"].name, styles["body"].name)
+
+
+def _list_items(list_flowable):
+    """Each ListItem's flowables, in order: the item's text and its blocks.
+
+    ReportLab expands a multi-flowable ListItem into one indenter per
+    flowable, and only the first of them carries the bullet.
+    """
+    items = []
+    for indenter in list_flowable._content:
+        if indenter._bullet is not None or not items:
+            items.append([])
+        items[-1].append(indenter._flowable)
+    return items
+
+
+class NestedListContent(unittest.TestCase):
+    """Lines indented to an item's text column belong to that item."""
+
+    STEPS = (
+        "4. Open **Data Explorer**. Choose the dataset.\n"
+        "5. Open the **Visualizations** tab. Set **Series label** to:\n"
+        "\n"
+        "   > Daily cases\n"
+        "\n"
+        "   and set **Color** to:\n"
+        "\n"
+        "   > #123456\n"
+        "\n"
+        "6. Return to the **Query** tab. Set **daily_new_cases** to **Sum**.\n"
+        "   - **Before this change:** the styled series was dropped.\n"
+        "   - **Now:** the bars stay `#123456`.\n"
+        "7. Reload the page. The chart returns with the same label.\n"
+    )
+
+    def test_one_ordered_list_keeps_its_start_number(self):
+        story = main.parse_markdown(self.STEPS)
+        self.assertEqual([type(f).__name__ for f in story], ["ListFlowable"])
+        steps = story[0]
+        self.assertEqual(steps._bulletType, "1")
+        self.assertEqual(str(steps._start), "4")
+        items = _list_items(steps)
+        self.assertEqual(len(items), 4)
+        self.assertTrue(items[3][0].text.startswith("Reload the page."))
+
+    def test_quotes_and_continuation_paragraph_render_inside_the_item(self):
+        item = _list_items(main.parse_markdown(self.STEPS)[0])[1]
+        self.assertEqual(
+            [type(f).__name__ for f in item], ["Paragraph", "Table", "Paragraph", "Table"]
+        )
+        self.assertIn("Daily cases", item[1]._cellvalues[0][0].text)
+        self.assertEqual(item[2].text, "and set <b>Color</b> to:")
+        self.assertIn("#123456", item[3]._cellvalues[0][0].text)
+
+    def test_nested_bullets_render_as_a_nested_list(self):
+        item = _list_items(main.parse_markdown(self.STEPS)[0])[2]
+        self.assertEqual([type(f).__name__ for f in item], ["Paragraph", "ListFlowable"])
+        self.assertEqual(item[0].text, "Return to the <b>Query</b> tab. Set <b>daily_new_cases</b> to <b>Sum</b>.")
+        nested = item[1]
+        self.assertEqual(nested._bulletType, "bullet")
+        self.assertEqual(len(_list_items(nested)), 2)
+
+    def test_fenced_code_after_a_blank_line_renders_inside_the_item(self):
+        story = main.parse_markdown(
+            "1. Rebuild the database.\n"
+            "\n"
+            "   ```\n"
+            "   pnpm db:reset\n"
+            "\n"
+            "   pnpm db:seed\n"
+            "   ```\n"
+            "\n"
+            "2. Run `pnpm dev`.\n"
+        )
+        self.assertEqual([type(f).__name__ for f in story], ["ListFlowable"])
+        first, second = _list_items(story[0])
+        self.assertEqual([type(f).__name__ for f in first], ["Paragraph", "Table"])
+        code = first[1]
+        self.assertEqual(code._cellvalues[0][0].lines, ["pnpm db:reset", "", "pnpm db:seed"])
+        self.assertTrue(second[0].text.startswith("Run "))
+
+    def test_nested_blocks_are_narrowed_by_the_item_indent(self):
+        blocks = "> quoted\n\n```\ncode\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n"
+        top_level = main.parse_markdown(blocks)
+        nested = "".join(f"   {line}\n" if line else "\n" for line in blocks.splitlines())
+        story = main.parse_markdown("1. Step.\n\n" + nested)
+        _, *inside = _list_items(story[0])[0]
+        self.assertEqual(len(inside), 3)
+        for outer, inner in zip(top_level, inside):
+            self.assertAlmostEqual(sum(inner._argW), sum(outer._argW) - 18, places=4)
+
+    def test_unindented_text_after_a_blank_line_still_ends_the_list(self):
+        story = main.parse_markdown("1. Step.\n\n   > quoted\n\nA new paragraph.\n")
+        self.assertEqual([type(f).__name__ for f in story], ["ListFlowable", "Paragraph"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

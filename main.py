@@ -33,12 +33,13 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 import argparse
 import html
 import io
 import os
+import contextlib
 import copy
 import re
 import shutil
@@ -48,7 +49,7 @@ import sys
 import tempfile
 from pathlib import Path
 from functools import lru_cache
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 from html import unescape
 from xml.sax.saxutils import escape
 
@@ -623,6 +624,27 @@ FRAME_PADDING = 6.0  # ReportLab Frame default on every side
 CONTENT_WIDTH = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - (2 * FRAME_PADDING)
 CONTENT_HEIGHT = PAGE_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN - (2 * FRAME_PADDING)
 
+# How far the blocks being built sit inside the frame. A list item's own code,
+# quotes and tables are built while this holds the item's indent, so their
+# fixed widths stay inside the item instead of running past the right margin.
+_BLOCK_INDENT = 0.0
+
+
+def block_width() -> float:
+    """Width available to the block being built: the frame minus any indent."""
+    return CONTENT_WIDTH - _BLOCK_INDENT
+
+
+@contextlib.contextmanager
+def indented_blocks(points: float) -> Iterator[None]:
+    """Build blocks `points` further in, as the content of a list item."""
+    global _BLOCK_INDENT
+    _BLOCK_INDENT += points
+    try:
+        yield
+    finally:
+        _BLOCK_INDENT -= points
+
 # Room a table cell keeps for its content once its padding is paid for. Below
 # roughly this, a cell cannot seat a single glyph and ReportLab raises rather
 # than clipping, so it is a floor on column width and not a style choice.
@@ -820,6 +842,34 @@ def _emphasis(text: str) -> str:
     return "".join(parts)
 
 
+# Raw HTML `<sup>` reaches this point already escaped, since code spans were
+# pulled out first and stay literal. Only a matched pair becomes a superscript;
+# a stray open or close tag keeps printing as text. Size and rise are relative,
+# so a marker stays in proportion in headings and in shrunken table type.
+_SUPERSCRIPT_RE = re.compile(r"&lt;sup&gt;(.*?)&lt;/sup&gt;", re.IGNORECASE | re.S)
+SUPERSCRIPT_OPEN = '<super size="70%" rise="40%">'
+
+
+def _emphasis_and_superscripts(text: str) -> str:
+    """Apply emphasis to escaped text and render matched `<sup>` pairs.
+
+    Each superscript gets its own emphasis pass behind a placeholder, so a
+    delimiter can never pair across its boundary and emit crossing tags.
+    """
+    superscripts: list[str] = []
+
+    def stash(match: re.Match) -> str:
+        superscripts.append(_emphasis(match.group(1)))
+        return f"\x04SUP{len(superscripts) - 1}\x04"
+
+    text = _emphasis(_SUPERSCRIPT_RE.sub(stash, text))
+    return re.sub(
+        r"\x04SUP(\d+)\x04",
+        lambda match: f"{SUPERSCRIPT_OPEN}{superscripts[int(match.group(1))]}</super>",
+        text,
+    )
+
+
 # Markdown inline link: [text](target). Not preceded by ! (that's an image).
 # Target is any run without whitespace or a closing paren.
 _LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)")
@@ -868,7 +918,7 @@ def inline_markup(text: str, base_dir: str | None = None) -> str:
     # are not mangled by emphasis passes; they are rebuilt as <a> tags last.
     text, links = _extract_links(text)
     text = escape(text)
-    text = _emphasis(text)
+    text = _emphasis_and_superscripts(text)
 
     def _restore(match: re.Match) -> str:
         idx = int(match.group(1))
@@ -883,7 +933,7 @@ def inline_markup(text: str, base_dir: str | None = None) -> str:
 
         def _restore_link(match: re.Match) -> str:
             label, target = links[int(match.group(1))]
-            inner = _emphasis(escape(label))
+            inner = _emphasis_and_superscripts(escape(label))
             # Labels were stashed before the outer code-restoration pass, so
             # restore their code spans too, after escaping and emphasis.
             inner = re.sub(r"\x01CODE(\d+)\x01", _restore, inner)
@@ -1112,6 +1162,35 @@ def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[s
     }
 
 
+# A `<small>` ... `</small>` region on lines of their own (typically a
+# glossary table) reads a little smaller but stays readable. Prose drops a
+# point; a table starts its fitting search 1.5 pt lower and still stops at
+# MIN_TABLE_FONT_SIZE. Leading shrinks along the same curve `_fit_table` uses.
+SMALL_TEXT_SHRINK = 1.0
+SMALL_TABLE_SHRINK = 1.5
+_SMALL_TEXT_STYLES = ("body", "bullet", "quote_plain", "callout", "scheduled")
+_SMALL_TABLE_STYLES = ("table_cell", "table_header")
+
+
+def small_styles(styles: dict[str, ParagraphStyle]) -> dict[str, ParagraphStyle]:
+    """Copies of the prose and table styles for a `<small>` region.
+
+    Headings and code keep their size. Copies keep their names, so a caption
+    inside the region is still recognized as one.
+    """
+    shrunk = dict(styles)
+    for keys, points, leading_points in (
+        (_SMALL_TEXT_STYLES, SMALL_TEXT_SHRINK, 1.5 * SMALL_TEXT_SHRINK),
+        (_SMALL_TABLE_STYLES, SMALL_TABLE_SHRINK, 2 * SMALL_TABLE_SHRINK),
+    ):
+        for key in keys:
+            style = copy.copy(styles[key])
+            style.fontSize = styles[key].fontSize - points
+            style.leading = styles[key].leading - leading_points
+            shrunk[key] = style
+    return shrunk
+
+
 def _hang_leading_emoji(text: str, style: ParagraphStyle) -> ParagraphStyle:
     """Return `style` with the first line pulled left by a leading emoji's
     left side bearing, so the glyph's ink lands flush on the margin.
@@ -1150,7 +1229,7 @@ def paragraph(text: str, style: ParagraphStyle) -> Paragraph:
 def callout_box(lines: Iterable[str], style: ParagraphStyle) -> Table:
     text = " ".join(line.strip() for line in lines if line.strip())
     cell = Paragraph(inline_markup(text), style)
-    table = Table([[cell]], colWidths=[PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN])
+    table = Table([[cell]], colWidths=[PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - _BLOCK_INDENT])
     table.setStyle(
         TableStyle(
             [
@@ -1301,7 +1380,7 @@ _CODE_MARKUP_TOKEN_RE = re.compile(r"<[^>]*>|&[A-Za-z][A-Za-z0-9]*;|&#[0-9]+;|."
 
 def code_columns(style: ParagraphStyle) -> int:
     """How many monospace characters fit across a code block's text area."""
-    available = CONTENT_WIDTH - 20
+    available = block_width() - 20
     per_character = pdfmetrics.stringWidth("M", style.fontName, style.fontSize)
     if per_character <= 0:
         return 80
@@ -1516,7 +1595,7 @@ def code_block(
             cell = _plain_cell()
     else:
         cell = _plain_cell()
-    width = CONTENT_WIDTH
+    width = block_width()
     if highlight_lines:
         # One row per line, so a called-out line can carry its own background
         # across the full block width. A single cell cannot: `backColor` on a
@@ -1888,7 +1967,7 @@ def local_image_block(target: str, base_dir: str | None = None) -> Image:
     except (OSError, ValueError) as error:
         raise ValueError(f"Could not read image file: {image_path}") from error
     fit = min(
-        CONTENT_WIDTH / native_width,
+        block_width() / native_width,
         CONTENT_HEIGHT / native_height,
         1.0,
     )
@@ -1905,7 +1984,7 @@ def local_image_block(target: str, base_dir: str | None = None) -> Image:
 
 def blockquote(text: str, style: ParagraphStyle) -> Table:
     cell = Paragraph(inline_markup(text), style)
-    table = Table([[cell]], colWidths=[PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN])
+    table = Table([[cell]], colWidths=[PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - _BLOCK_INDENT])
     table.setStyle(
         TableStyle(
             [
@@ -2170,7 +2249,7 @@ def _fit_table(
     word_counts = [[len(_visible_cell_text(cell).split()) for cell in row] for row in source]
     size = max(MIN_TABLE_FONT_SIZE, styles["table_cell"].fontSize)
     n_cols = len(header)
-    available = CONTENT_WIDTH
+    available = block_width()
 
     while True:
         cell_styles = {}
@@ -2399,9 +2478,24 @@ def flush_bullets(
     buffer: list[tuple[str, str, str | None, int | None]],
     story: list[Flowable],
     styles: dict[str, ParagraphStyle],
+    children: Sequence[list[str]] | None = None,
+    render_blocks: Callable[[list[str], float], list[Flowable]] | None = None,
 ) -> None:
+    """Emit the buffered items as one list.
+
+    `children` holds, per item, the source lines indented under it (already
+    dedented to the item's text column). `render_blocks` turns them into the
+    item's own blocks, built `indent` points in, after the item's text.
+    """
     if not buffer:
         return
+
+    def item_content(index: int, first: Paragraph, indent: float) -> Flowable | list[Flowable]:
+        lines = children[index] if children and index < len(children) else []
+        if not lines or render_blocks is None:
+            return first
+        return [first, *render_blocks(lines, indent)]
+
     # An item whose last source line carried a hard break has nothing after it
     # to break away from, so the marker would render as a trailing blank line.
     buffer[:] = [
@@ -2436,11 +2530,12 @@ def flush_bullets(
     # "checkbox first" matters more than period alignment for a printable plan.
     if ordered and all_checkbox:
         items: list[ListItem] = []
-        for idx, (_, text, state, _) in enumerate(buffer, start=start_number):
+        for index, (_, text, state, _) in enumerate(buffer):
             glyph = CHECKBOX_CHECKED if state == "checked" else CHECKBOX_UNCHECKED
+            number = start_number + index
             items.append(
                 ListItem(
-                    paragraph(f"{idx}. {text}", styles["bullet"]),
+                    item_content(index, paragraph(f"{number}. {text}", styles["bullet"]), 22),
                     leftIndent=22,
                     bulletFontName=checkbox_bullet_font,
                     bulletFontSize=10.5,
@@ -2464,7 +2559,7 @@ def flush_bullets(
         return
 
     items = []
-    for kind, text, state, _ in buffer:
+    for index, (kind, text, state, _) in enumerate(buffer):
         glyph: str | None
         if state == "checked":
             glyph = CHECKBOX_CHECKED
@@ -2494,7 +2589,8 @@ def flush_bullets(
             item_kwargs["value"] = glyph
             item_kwargs["bulletFontName"] = checkbox_bullet_font
 
-        items.append(ListItem(paragraph(display_text, styles["bullet"]), **item_kwargs))
+        first = paragraph(display_text, styles["bullet"])
+        items.append(ListItem(item_content(index, first, item_kwargs["leftIndent"]), **item_kwargs))
 
     list_kwargs = {
         "bulletType": "1" if ordered else "bullet",
@@ -2542,6 +2638,73 @@ def _starts_a_block(stripped: str) -> bool:
     )
 
 
+# A list marker and the spaces after it. Its end is the item's text column.
+_LIST_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+
+
+def _indent_of(line: str) -> int:
+    expanded = line.expandtabs(4)
+    return len(expanded) - len(expanded.lstrip())
+
+
+def list_content_column(raw_line: str) -> int:
+    """The column a list item's text starts at, which its own blocks indent to."""
+    match = _LIST_MARKER_RE.match(raw_line.expandtabs(4))
+    return match.end() if match else _indent_of(raw_line)
+
+
+def _dedent(line: str, column: int) -> str:
+    expanded = line.expandtabs(4)
+    return expanded[min(column, _indent_of(expanded)):]
+
+
+def _opens_item_block(text: str) -> bool:
+    """Whether a line under a list item opens a block rather than continuing its text."""
+    return (
+        _LIST_MARKER_RE.match(text) is not None
+        or text.startswith((">", "```", "|"))
+        or _starts_a_block(text)
+    )
+
+
+def _fence_is_open(lines: Iterable[str]) -> bool:
+    return sum(1 for line in lines if line.lstrip().startswith("```")) % 2 == 1
+
+
+def _belongs_to_item(raw_lines: Sequence[str], index: int, column: int, children: list[str]) -> bool:
+    """Whether `raw_lines[index]` is part of the open list item's own blocks.
+
+    A line indented to the item's text column belongs to it, as does a blank
+    line followed by one, and everything inside a fence the item opened. Until
+    the item has a block of its own, plain indented text instead continues the
+    item's first paragraph, which the lazy-continuation rule already folds in.
+    """
+    line = raw_lines[index]
+    if _fence_is_open(children):
+        return True
+    if not line.strip():
+        following = next((later for later in raw_lines[index + 1:] if later.strip()), None)
+        return following is not None and _indent_of(following) >= column
+    if _indent_of(line) < column:
+        return False
+    return bool(children) or _opens_item_block(_dedent(line, column).strip())
+
+
+def _next_item_continues_list(raw_lines: Sequence[str], index: int, kind: str) -> bool:
+    """Whether the next non-blank line is another item of the same kind of list.
+
+    Blank lines between items make a loose list, not two lists, so numbering
+    and spacing carry on across them.
+    """
+    following = next((later for later in raw_lines[index + 1:] if later.strip()), None)
+    if following is None:
+        return False
+    stripped = following.strip()
+    if kind == "ordered":
+        return re.match(r"^\d+[.)]\s+\S", stripped) is not None
+    return re.match(r"^[-*+]\s+\S", stripped) is not None
+
+
 def parse_markdown(
     markdown: str,
     *,
@@ -2550,28 +2713,60 @@ def parse_markdown(
     font_shrink: float = 0.0,
     agenda_tables: bool = False,
     black_text: bool = False,
+    _styles: dict[str, ParagraphStyle] | None = None,
 ) -> list[Flowable]:
+    """Parse Markdown into a story. `_styles` replaces the built styles when
+    a list item's own blocks are parsed with the list's styles."""
     global _BLACK_TEXT
     _BLACK_TEXT = black_text
-    styles = make_styles(font_shrink=font_shrink, black_text=black_text)
+    base_styles = _styles or make_styles(font_shrink=font_shrink, black_text=black_text)
+    styles = base_styles
     story: list[Flowable] = []
     paragraph_buffer: list[str] = []
     bullet_buffer: list[tuple[str, str, str | None, int | None]] = []
+    # Per buffered item, the lines indented under it, dedented to its text
+    # column, and the text column of the item being filled.
+    bullet_children: list[list[str]] = []
+    item_column = 0
     quote_buffer: list[str] = []
     code_buffer: list[str] = []
     code_language: str = ""
     code_highlight: frozenset[int] = frozenset()
     in_code_block = False
 
+    def render_item_blocks(lines: list[str], indent: float) -> list[Flowable]:
+        # An item's paragraphs keep the list's tight spacing.
+        with indented_blocks(indent):
+            return parse_markdown(
+                "\n".join(lines),
+                table_borders=table_borders,
+                compact_tables=compact_tables,
+                agenda_tables=agenda_tables,
+                black_text=black_text,
+                _styles=dict(styles, body=styles["bullet"]),
+            )
+
+    def flush_list() -> None:
+        flush_bullets(bullet_buffer, story, styles, bullet_children, render_item_blocks)
+        bullet_children.clear()
+
     def flush_all() -> None:
         flush_paragraph(paragraph_buffer, story, styles)
-        flush_bullets(bullet_buffer, story, styles)
+        flush_list()
         flush_quotes(quote_buffer, story, styles)
 
     raw_lines = markdown.splitlines()
     i = 0
     while i < len(raw_lines):
         raw_line = raw_lines[i]
+
+        # Lines indented to the open item's text column are that item's own
+        # blocks: a further paragraph, a quote, a fence, a nested list. They
+        # are parsed as a document of their own when the list is flushed.
+        if bullet_buffer and _belongs_to_item(raw_lines, i, item_column, bullet_children[-1]):
+            bullet_children[-1].append(_dedent(raw_line, item_column))
+            i += 1
+            continue
 
         # Fenced code blocks: ``` opens, ``` closes. Optional language tag on
         # the opening fence (```rust, ```gdscript, ```json, ...) enables
@@ -2622,13 +2817,23 @@ def parse_markdown(
         buffered = stripped + HARD_BREAK if hard_break else stripped
 
         if not stripped:
+            if not (bullet_buffer and _next_item_continues_list(raw_lines, i, bullet_buffer[-1][0])):
+                flush_all()
+            i += 1
+            continue
+
+        # `<small>` and `</small>` on lines of their own bound a region set in
+        # smaller type. The tag lines never print, and an unclosed region runs
+        # to the end of the document.
+        if stripped.lower() in ("<small>", "</small>"):
             flush_all()
+            styles = base_styles if stripped.startswith("</") else small_styles(base_styles)
             i += 1
             continue
 
         if stripped.startswith(">"):
             flush_paragraph(paragraph_buffer, story, styles)
-            flush_bullets(bullet_buffer, story, styles)
+            flush_list()
             quote_buffer.append(buffered.lstrip("> ").strip())
             i += 1
             continue
@@ -2645,7 +2850,7 @@ def parse_markdown(
             and _is_table_separator(raw_lines[i + 1])
         ):
             flush_paragraph(paragraph_buffer, story, styles)
-            flush_bullets(bullet_buffer, story, styles)
+            flush_list()
             alignments = _parse_table_alignments(raw_lines[i + 1])
             header = _parse_table_row(stripped)
             body_rows: list[list[str]] = []
@@ -2686,6 +2891,8 @@ def parse_markdown(
             else:
                 state = "unchecked"
             bullet_buffer.append((kind, text, state, explicit_number))
+            bullet_children.append([])
+            item_column = list_content_column(raw_line)
             i += 1
             continue
 
@@ -2696,7 +2903,7 @@ def parse_markdown(
         # items, so it reads as "list item, just without the checkbox/number".
         if SCHEDULED_LINE_RE.match(stripped):
             flush_paragraph(paragraph_buffer, story, styles)
-            flush_bullets(bullet_buffer, story, styles)
+            flush_list()
             story.append(paragraph(stripped, styles["scheduled"]))
             i += 1
             continue
@@ -2706,12 +2913,17 @@ def parse_markdown(
         # this, every wrapped bullet ends its own list and the continuation
         # lands as a body paragraph at the wrong indent.
         if bullet_buffer and not _starts_a_block(stripped):
+            if bullet_children[-1]:
+                # Lazy continuation of the item's last block, not its text.
+                bullet_children[-1].append(raw_line.lstrip())
+                i += 1
+                continue
             kind, text, state, number = bullet_buffer[-1]
             bullet_buffer[-1] = (kind, append_soft_line(text, buffered), state, number)
             i += 1
             continue
 
-        flush_bullets(bullet_buffer, story, styles)
+        flush_list()
 
         if stripped == "---":
             flush_paragraph(paragraph_buffer, story, styles)
