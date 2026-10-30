@@ -17,8 +17,11 @@ run.sh <file.md> [<path> | --out <path>]
 ## Entry point (`run.sh`)
 
 `install.sh` provisions or repairs the private Python environment, installs the
-runtime requirements, and optionally provisions Mermaid and its browser. It
-publishes one executable launcher atomically in `BIN_DIR` (default
+runtime requirements, and optionally provisions Mermaid and its browser.
+It uses `npm ci` to preserve the committed dependency graph and avoid rewriting
+tracked manifests during installation. Release version synchronization updates
+both `package.json` and the root metadata in `package-lock.json`.
+It publishes one executable launcher atomically in `BIN_DIR` (default
 `$HOME/.local/bin`), named `markdown-to-pdf` unless `--name <command>` selects
 another filename. Reinstalling the same name replaces it. Argument validation
 and help happen before installation. The launcher forwards arguments to
@@ -183,7 +186,8 @@ absolute checkout path and can be run directly by anyone.
 
 ## Testing
 
-`python3 -m unittest test_install -v` checks named/repeated installation,
+`python3 -m unittest test_install -v` checks named/repeated installation without
+modifying tracked package manifests,
 side-effect-free help and invalid arguments, real virtualenv repair and Python
 dependency installation, optional Mermaid provisioning with a failed browser
 download, conversion without Node, and the moved-checkout diagnostic. These

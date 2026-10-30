@@ -130,8 +130,8 @@ npm pack
 npm install --save-dev /path/to/avandar-markdown-to-pdf-VERSION.tgz
 ```
 
-`npm pack` synchronizes the npm version from `main.py`; change `__version__`
-there for releases. The tarball includes only the CLI runtime, shell entry
+`npm pack` synchronizes the npm package and lockfile versions from `main.py`;
+change `__version__` there for releases. The tarball includes only the CLI runtime, shell entry
 points, version script, and package documentation/license. No programmatic
 JavaScript API is provided. `npm run test:npm` tests packed local/global
 installations using temporary directories (requires network and Python).
@@ -139,6 +139,11 @@ The integration test currently targets POSIX systems; Windows launcher support
 has not been verified.
 
 ## Install
+
+Installation uses the committed npm lockfile for optional Mermaid dependencies
+and leaves tracked package files unchanged. Dependency updates belong in the
+source checkout: regenerate and commit the lockfile there before distributing
+the change.
 
 ```sh
 git clone https://github.com/AvandarLabs/markdown-to-pdf.git

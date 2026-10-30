@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-  printf '%s\n' 'Install or update markdown-to-pdf as an executable command.
+  printf '%s\n' 'Install or update markdown-to-pdf with the pinned optional Mermaid renderer.
 
 Usage: ./install.sh [--name <command>] [-h|--help]
 
@@ -85,7 +85,7 @@ echo "Installing dependencies…" >&2
 # this clone plus puppeteer's shared cache; nothing is installed globally.
 if command -v npm >/dev/null 2>&1; then
   echo "Installing the mermaid renderer…" >&2
-  if npm install --prefix "$script_dir" >&2; then
+  if npm ci --prefix "$script_dir" >&2; then
     # puppeteer's own postinstall is commonly blocked by npm's allowScripts
     # policy, which leaves mermaid-cli with no browser to drive. Asking for the
     # browser explicitly works either way and overrides no security setting.
@@ -98,7 +98,7 @@ if command -v npm >/dev/null 2>&1; then
       echo "        cd $script_dir && npx puppeteer browsers install chrome-headless-shell" >&2
     }
   else
-    echo "note: 'npm install' failed; mermaid diagrams will print as source." >&2
+    echo "note: 'npm ci' failed; mermaid diagrams will print as source." >&2
   fi
 else
   echo >&2

@@ -13,6 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 
 class InstallTests(unittest.TestCase):
     def test_named_install_replaces_only_the_requested_executable(self):
+        manifests = {name: (REPO_ROOT / name).read_bytes()
+                     for name in ("package.json", "package-lock.json")}
         with TemporaryDirectory() as directory:
             destination = Path(directory)
             for _ in range(2):
@@ -22,6 +24,9 @@ class InstallTests(unittest.TestCase):
                     capture_output=True, text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+                for name, original in manifests.items():
+                    self.assertEqual((REPO_ROOT / name).read_bytes(), original,
+                                     f"Installing must not modify tracked {name}")
                 self.assertEqual(list(destination.iterdir()), [destination / "contract-probe"])
                 result = subprocess.run(
                     [destination / "contract-probe", "--version"],
@@ -55,7 +60,7 @@ class InstallTests(unittest.TestCase):
                 root = Path(directory)
                 source = root / "source"
                 source.mkdir()
-                for name in ["install.sh", "run.sh", "main.py", "requirements.txt", "package.json"]:
+                for name in ["install.sh", "run.sh", "main.py", "requirements.txt", "package.json", "package-lock.json"]:
                     shutil.copy2(REPO_ROOT / name, source / name)
                 python = source / ".venv/bin/python"
                 python.parent.mkdir(parents=True)
@@ -84,7 +89,7 @@ class InstallTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 if with_npm:
                     self.assertEqual(log.read_text().splitlines(), [
-                        f"npm install --prefix {source}",
+                        f"npm ci --prefix {source}",
                         f"npx --prefix {source} puppeteer browsers install chrome-headless-shell",
                     ])
                 markdown = root / "sample.md"

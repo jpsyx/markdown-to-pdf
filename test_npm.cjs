@@ -6,6 +6,27 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+test('release version synchronization keeps the dependency lock consistent', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'markdown version test '));
+  try {
+    fs.mkdirSync(path.join(temp, 'scripts'));
+    fs.copyFileSync(path.join(__dirname, 'scripts/sync-version.cjs'), path.join(temp, 'scripts/sync-version.cjs'));
+    fs.writeFileSync(path.join(temp, 'main.py'), '__version__ = "1.2.3"\n');
+    fs.writeFileSync(path.join(temp, 'package.json'), JSON.stringify({ name: 'example', version: '1.2.2' }));
+    fs.writeFileSync(path.join(temp, 'package-lock.json'), JSON.stringify({
+      name: 'example', version: '1.2.2', lockfileVersion: 3,
+      packages: { '': { name: 'example', version: '1.2.2' }, 'node_modules/example': { version: '4.5.6' } },
+    }));
+    const result = spawnSync(process.execPath, [path.join(temp, 'scripts/sync-version.cjs')], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const lock = JSON.parse(fs.readFileSync(path.join(temp, 'package-lock.json'), 'utf8'));
+    assert.equal(lock.version, '1.2.3');
+    assert.equal(lock.packages[''].version, '1.2.3');
+    assert.equal(lock.packages['node_modules/example'].version, '4.5.6');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(temp, 'package.json'), 'utf8')).version, '1.2.3');
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
+
 test('packed CLI works locally and globally without install scripts or Mermaid', { timeout: 240000 }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'markdown npm test '));
   const env = { ...process.env, MARKDOWN_TO_PDF_CACHE_DIR: path.join(temp, 'python cache') };
