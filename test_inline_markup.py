@@ -2456,5 +2456,167 @@ class NestedListContent(unittest.TestCase):
         self.assertEqual([type(f).__name__ for f in story], ["ListFlowable", "Paragraph"])
 
 
+class PDFDecorations(unittest.TestCase):
+    """Real PDF checks catch missing, misplaced, unsafe, or leaking decorations."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / "guide.md"
+        self.source.write_text("BODYFIRST\n\n<div style=\"page-break-before: always;\"></div>\n\nBODYSECOND\n")
+        from PIL import Image
+        self.header = self.root / "header.png"
+        self.watermark = self.root / "watermark.png"
+        Image.new("RGB", (20, 5), "red").save(self.header)
+        Image.new("RGB", (10, 20), "blue").save(self.watermark)
+
+    def cli(self, *flags, output="result.pdf"):
+        destination = self.root / output
+        result = subprocess.run([sys.executable, main.__file__, str(self.source), "--out", str(destination), *map(str, flags)], capture_output=True, text=True)
+        return result, destination
+
+    def streams(self, path):
+        import base64
+        streams = []
+        for match in re.finditer(rb"<<(.*?)>>\s*stream\r?\n(.*?)endstream", path.read_bytes(), re.S):
+            dictionary, content = match.groups()
+            if b"ASCII85Decode" in dictionary:
+                content = base64.a85decode(content.strip(), adobe=True)
+            if b"FlateDecode" in dictionary:
+                content = zlib.decompress(content)
+            if b"BT" in content and b" Tm" in content:
+                streams.append(content)
+        return streams
+
+    def test_images_footer_and_callout_are_painted_in_the_pdf(self):
+        result, pdf = self.cli(
+            "--header", self.header, "--header-x", 235.5, "--header-y", 730,
+            "--header-width", 141, "--header-opacity", .55,
+            "--watermark", self.watermark, "--watermark-x", 72, "--watermark-y", 72,
+            "--watermark-width", 100, "--watermark-opacity", .25,
+            "--footer", '<font color="#94A4B8">RIGHTSFOOTER</font>',
+            "--footer-x", 77.25, "--footer-y", 20, "--footer-width", 440, "--footer-opacity", .8,
+            "--copyright-callout", "**NOTICEFIRST**. All rights reserved.", "--black-text")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        streams = self.streams(pdf)
+        self.assertEqual(len(streams), 2)
+        for stream in streams:
+            self.assertIn(b"100 0 0 200 72 72 cm", stream)
+            self.assertIn(b"141 0 0 35.25 235.5 730 cm", stream)
+            self.assertIn(b"77.25 20 cm", stream)
+            self.assertIn(b"RIGHTSFOOTER", stream)
+            alpha_states = dict(re.findall(rb"/(gRLs\d+)\s*<<\s*/ca ([.0-9]+)", pdf.read_bytes()))
+            applied = re.findall(rb"/(gRLs\d+) gs", stream[:stream.index(b"RIGHTSFOOTER")])
+            self.assertEqual([alpha_states[s] for s in applied if s in alpha_states][-1], b".8")
+            self.assertLess(stream.index(b" Do"), stream.index(b"BODY"))
+            self.assertIn(b".580392 .643137 .721569 rg", stream)
+        self.assertIn(b"NOTICEFIRST", streams[0])
+        self.assertNotIn(b"NOTICEFIRST", streams[1])
+        self.assertLess(streams[0].index(b"NOTICEFIRST"), streams[0].index(b"BODYFIRST"))
+        self.assertRegex(streams[0], rb"5[0-9.]+ 20 Tm /F[^ ]+ 8.5 Tf 10.2 TL \(1\)")
+        self.assertIn(b"/ca .55", pdf.read_bytes())
+        self.assertIn(b"/ca .25", pdf.read_bytes())
+        self.assertIn(b"/ca .8", pdf.read_bytes())
+
+    def test_decorated_output_is_deterministic_and_reserves_image_space(self):
+        flags = ["--header", self.header, "--header-y", "700", "--header-width", "120",
+            "--watermark", self.watermark, "--watermark-opacity", "0.1",
+            "--footer", "Repeated rights notice", "--footer-y", "60", "--deterministic"]
+        result, pdf = self.cli(*flags)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        original = pdf.read_bytes()
+        # The header's lower edge is 700; body top is at most 690.
+        body_stream = self.streams(pdf)[0]
+        body_origin = re.findall(rb"1 0 0 1 ([0-9.]+) ([0-9.]+) cm", body_stream)[-1]
+        self.assertLessEqual(float(body_origin[1]) + 16.5, 690)
+        pdf.unlink()
+        result, pdf = self.cli(*flags)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(pdf.read_bytes(), original)
+
+    def test_footer_opacity_also_applies_to_inline_code_background(self):
+        result, pdf = self.cli("--footer", "`CODEFOOTER`", "--footer-opacity", "0.25")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        stream = self.streams(pdf)[0]
+        alpha_states = dict(re.findall(rb"/(gRLs\d+)\s*<<\s*/ca ([.0-9]+)", pdf.read_bytes()))
+        applied = re.findall(rb"/(gRLs\d+) gs", stream[:stream.index(b"CODEFOOTER")])
+        self.assertTrue(applied)
+        self.assertEqual({alpha_states[s] for s in applied if s in alpha_states}, {b".25"})
+
+    def test_html_callout_and_deterministic_output(self):
+        flags = ["--copyright-callout", "<p><b>NOTICEHTML</b><br/>Reserved for readers.</p>", "--deterministic"]
+        result, pdf = self.cli(*flags)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        original = pdf.read_bytes()
+        pdf.unlink()
+        result, pdf = self.cli(*flags)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(pdf.read_bytes(), original)
+        self.assertIn(b"NOTICEHTML", self.streams(pdf)[0])
+        self.assertNotIn(b"<b>", self.streams(pdf)[0])
+
+    def test_bad_decoration_options_fail_before_creating_output(self):
+        bad_image = self.root / "bad.png"
+        bad_image.write_text("not an image")
+        for flags in [
+            ["--header", self.root / "missing.png"], ["--watermark", "https://example.com/logo.png"],
+            ["--header", bad_image], ["--header", self.header, "--header-opacity", "nan"],
+            ["--header", self.header, "--header-opacity", "1.1"],
+            ["--watermark", self.watermark, "--watermark-width", "0"],
+            ["--footer", "text", "--footer-x", "-1"],
+            ["--footer", "text", "--footer-width", "1000"],
+            ["--copyright-callout", '<img src="https://example.com/remote.png"/>'],
+            ["--footer", '<font name="Helvetica">bad</font>'],
+            ["--copyright-callout", "<script>alert(1)</script>"],
+            ["--font-regular", bad_image], ["--font-bold", bad_image],
+            ["--margin-left", "600"], ["--margin-top", "nan"],
+        ]:
+            with self.subTest(flags=flags):
+                result, output = self.cli(*flags)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(output.exists())
+                self.assertIn("error:", result.stderr.lower())
+                self.assertNotIn("unrecognized arguments", result.stderr)
+
+    def test_font_style_changes_do_not_reuse_a_different_family(self):
+        import reportlab
+        regular = Path(reportlab.__file__).parent / "fonts" / "Vera.ttf"
+        bold = regular.with_name("VeraBd.ttf")
+        self.source.write_text("**BOLDMARK** *ITALICMARK*\n")
+        main.convert_markdown_to_pdf(self.source, self.root / "first-family.pdf",
+            font_regular=regular, font_bold=bold)
+        output = main.convert_markdown_to_pdf(self.source, self.root / "second-family.pdf",
+            font_regular=regular, font_italic=bold)
+        stream = self.streams(output)[0]
+        fonts = {name: face for face, name in re.findall(
+            rb"/BaseFont /([^ ]+) [^>]*?/Name /([^ ]+)", output.read_bytes())}
+        for marker, expected in ((b"BOLDMARK", b"BitstreamVeraSans-Roman"), (b"ITALICMARK", b"BitstreamVeraSans-Bold")):
+            selected = re.findall(rb"/(F[^ ]+) [0-9.]+ Tf", stream[:stream.index(marker)])[-1]
+            self.assertTrue(fonts[selected].endswith(expected), (marker, fonts[selected]))
+
+    def test_custom_fonts_margins_and_defaults_restore_between_conversions(self):
+        # The bundled font makes this test portable and independent of system fonts.
+        import reportlab
+        regular = Path(reportlab.__file__).parent / "fonts" / "Vera.ttf"
+        bold = regular.with_name("VeraBd.ttf")
+        result, pdf = self.cli("--font-regular", regular, "--font-bold", bold,
+            "--font-italic", regular.with_name("VeraIt.ttf"), "--font-bold-italic", regular.with_name("VeraBI.ttf"),
+            "--margin-left", 66, "--margin-right", 66, "--margin-top", 72, "--margin-bottom", 54)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"BitstreamVeraSans", pdf.read_bytes())
+        self.assertIn(b"1 0 0 1 72 697.5 cm", self.streams(pdf)[0])
+        before = (main.BODY_FONT, main.BODY_FONT_BOLD, main.BODY_FONT_ITALIC, main.HEADING_FONT, main.HEADING_FONT_BOLD, main.CONTENT_WIDTH, main.CONTENT_HEIGHT, main.LEFT_MARGIN, main.TOP_MARGIN)
+        main.convert_markdown_to_pdf(self.source, self.root / "custom.pdf", font_regular=regular, font_bold=bold,
+            margin_left=66, margin_top=72, deterministic=True)
+        after = (main.BODY_FONT, main.BODY_FONT_BOLD, main.BODY_FONT_ITALIC, main.HEADING_FONT, main.HEADING_FONT_BOLD, main.CONTENT_WIDTH, main.CONTENT_HEIGHT, main.LEFT_MARGIN, main.TOP_MARGIN)
+        self.assertEqual(after, before)
+        first = main.convert_markdown_to_pdf(self.source, self.root / "default.pdf", deterministic=True).read_bytes()
+        (self.root / "default.pdf").unlink()
+        main.convert_markdown_to_pdf(self.source, self.root / "second-custom.pdf", font_regular=regular, margin_left=90)
+        second = main.convert_markdown_to_pdf(self.source, self.root / "default.pdf", deterministic=True).read_bytes()
+        self.assertEqual(first, second)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

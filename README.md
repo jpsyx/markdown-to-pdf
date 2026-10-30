@@ -6,6 +6,74 @@ This is a small Python tool (built on [ReportLab](https://pypi.org/project/repor
 
 See [publishing and repository transfer](docs/publishing.md) for maintainer setup.
 
+## Reusable page decorations
+
+Add local artwork, a repeated footer, and a first-page rights notice without
+changing the source Markdown:
+
+```sh
+markdown-to-pdf guide.md --out guide.pdf \
+  --header logo.png --header-width 120 --header-opacity 0.6 \
+  --watermark watermark.png --watermark-width 300 --watermark-opacity 0.15 \
+  --footer '<font color="#94A4B8">Copyright 2026. All rights reserved.</font>' \
+  --copyright-callout '**All rights reserved.** Shared for review only.' \
+  --deterministic
+
+markdown-to-pdf guide.md --out typeset.pdf \
+  --font-regular fonts/Regular.ttf --font-bold fonts/Bold.ttf \
+  --font-italic fonts/Italic.ttf --font-bold-italic fonts/BoldItalic.ttf \
+  --margin-left 66 --margin-right 66 --margin-top 72 --margin-bottom 54
+```
+
+All options are optional. Without them, the existing typography, margins, and
+page-number behavior stay the same. Coordinates and dimensions are PDF points
+(72 points per inch), measured from the page's bottom-left corner. Images keep
+their aspect ratio. `x`/`y` anchor the image's lower-left corner or the footer's
+lower-left text box, not its baseline.
+
+| Option | Purpose and default |
+| --- | --- |
+| `--header PATH` | Local raster image on every page. Default width 120, x at left margin, top edge 24 points below page top. |
+| `--watermark PATH` | Local raster image beneath each page's content. Default width 300, centered. |
+| `--footer TEXT` | Text on every page, 9-point type with 11-point leading. Default x at left margin, y 20, width equal to the margin box less 45 points. |
+| `--header-x`, `--header-y`, `--header-width`, `--header-opacity` | Override header placement, size, or opacity. |
+| `--watermark-x`, `--watermark-y`, `--watermark-width`, `--watermark-opacity` | Override watermark placement, size, or opacity. |
+| `--footer-x`, `--footer-y`, `--footer-width`, `--footer-opacity` | Override footer placement, text-box width, or opacity. |
+| `--copyright-callout TEXT` | Readable shaded box once, before the first document block. Must fit on the first page. |
+| `--font-regular PATH` | Local TTF for body, headings, callout, and footer; code font is unchanged. |
+| `--font-bold`, `--font-italic`, `--font-bold-italic` | Optional local TTF styles; require `--font-regular`. Omitted styles use regular, except bold-italic uses bold when supplied. |
+| `--margin-left`, `--margin-right`, `--margin-top`, `--margin-bottom` | Margin points; defaults 56.2, 56.2, 51.8, and 42. Header/footer automatically reserve additional space when needed. |
+| `--deterministic` | Stable PDF bytes for unchanged Markdown, assets, fonts, options, and output filename in the same rendering environment. |
+
+Opacity defaults to 1 and accepts values from 0 to 1. Widths must be positive;
+coordinates and margins must be finite and nonnegative. Artwork and footer
+boxes must fit inside the Letter page. Supported local image formats are PNG,
+JPEG, GIF, BMP, and TIFF. Remote image URLs are rejected. Decoration controls
+require their corresponding image or footer. Invalid options are rejected
+before the output file is selected, created, or replaced.
+
+Footer and callout text accept inline Markdown (bold, italic, code, and paragraph
+breaks) or this safe HTML subset: `b`, `strong`, `i`, `em`, `u`, `br`, `p`, and
+`font color="#RRGGBB"`. Tags must be balanced. Other tags, attributes, comments,
+links, and images are rejected; decoration text cannot execute HTML or fetch
+resources. Keep Markdown emphasis within one HTML text span. Literal HTML tags
+inside inline code must use escaped entities (for example, `&lt;div&gt;`), because
+the safe HTML parser runs before inline Markdown. For example:
+
+```sh
+markdown-to-pdf guide.md --copyright-callout \
+  '<p><strong>Reader notice</strong><br/>Shared for review only.</p>'
+```
+
+The footer repeats on single-page documents too. Existing page numbering remains
+hidden for one page and appears on every page of longer documents. When a custom
+footer is present, page numbers move to the right at the footer's y coordinate.
+`--black-text` still controls document text; an explicitly colored footer or
+callout span retains its chosen color. Custom fonts and margins apply only to
+the current conversion, including when several conversions share a Python
+process. Existing-output versioning still applies with `--deterministic`; use
+the same clean destination to reproduce byte-identical files.
+
 ## Install with npm
 
 The npm package is `@avandar/markdown-to-pdf`; its executable is `markdown-to-pdf`.

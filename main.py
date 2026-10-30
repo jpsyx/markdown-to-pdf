@@ -33,9 +33,11 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 import argparse
+import hashlib
+import math
 import html
 import io
 import os
@@ -48,9 +50,10 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Callable, Iterable, Iterator, Sequence
 from html import unescape
+from html.parser import HTMLParser
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -3277,6 +3280,178 @@ def draw_page_footer(canvas: Canvas, page: int, total: int) -> None:
     canvas.restoreState()
 
 
+class _SafeDecorationHTML(HTMLParser):
+    """Translate a small text-only subset, never loading external resources."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.stack: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        aliases = {"strong": "b", "em": "i"}
+        tag = aliases.get(tag, tag)
+        if tag not in {"b", "i", "u", "br", "p", "font"}:
+            raise ValueError(f"Unsupported decoration HTML tag: {tag}")
+        if tag == "font":
+            if len(attrs) != 1 or attrs[0][0] != "color" or not re.fullmatch(r"#[0-9A-Fa-f]{6}", attrs[0][1] or ""):
+                raise ValueError("Decoration font tags accept only color=\"#RRGGBB\"")
+            self.parts.append(f'<font color="{attrs[0][1]}">')
+        elif attrs:
+            raise ValueError(f"Attributes are not supported on decoration {tag} tags")
+        elif tag in {"br", "p"}:
+            self.parts.append("<br/>")
+        else:
+            self.parts.append(f"<{tag}>")
+        if tag != "br":
+            self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        tag = {"strong": "b", "em": "i"}.get(tag, tag)
+        if not self.stack or self.stack.pop() != tag:
+            raise ValueError(f"Unbalanced decoration HTML tag: {tag}")
+        self.parts.append("<br/>" if tag == "p" else f"</{tag}>")
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag != "br":
+            self.handle_endtag(tag)
+
+    def handle_data(self, text):
+        # Decoration text deliberately excludes links and images, including
+        # Markdown's link syntax. Nothing here may fetch or execute a resource.
+        if re.search(r"!?\[[^\]]*\]\(", text):
+            raise ValueError("Links and images are not supported in decoration text")
+        self.parts.append(inline_markup(text.replace("\n\n", HARD_BREAK).replace("\n", " ")))
+
+    def handle_comment(self, data):
+        raise ValueError("Comments are not supported in decoration text")
+
+    def unknown_decl(self, data):
+        raise ValueError("Declarations are not supported in decoration text")
+
+    def handle_decl(self, decl):
+        raise ValueError("Declarations are not supported in decoration text")
+
+
+def decoration_markup(text: str) -> str:
+    """Render inline Markdown or the documented safe HTML subset."""
+    parser = _SafeDecorationHTML()
+    parser.feed(normalize_text(text))
+    parser.close()
+    if parser.stack:
+        raise ValueError("Unbalanced decoration HTML tags")
+    markup = "".join(parser.parts)
+    return re.sub(r"^(?:<br/>)+|(?:<br/>)+$", "", markup)
+
+
+def _point(value: float | None, default: float, name: str, *, positive=False) -> float:
+    number = default if value is None else float(value)
+    if not math.isfinite(number) or number < 0 or (positive and number == 0):
+        raise ValueError(f"{name} must be a finite {'positive' if positive else 'nonnegative'} number")
+    return number
+
+
+def _opacity(value: float | None, name: str) -> float:
+    number = _point(value, 1, name)
+    if number > 1:
+        raise ValueError(f"{name} must be between 0 and 1")
+    return number
+
+
+def _decoration_image(path, x, y, width, opacity, name):
+    if path is None:
+        if any(v is not None for v in (x, y, width, opacity)):
+            raise ValueError(f"{name} controls require --{name}")
+        return None
+    path = Path(path).expanduser()
+    if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff"} or not path.is_file():
+        raise ValueError(f"{name} must be an existing local raster image")
+    try:
+        reader = ImageReader(str(path))
+        original_width, original_height = reader.getSize()
+        reader.getRGBData()  # Decode before choosing or opening an output file.
+    except Exception as err:
+        raise ValueError(f"Cannot read {name} image: {path}") from err
+    width = _point(width, 120 if name == "header" else 300, f"{name} width", positive=True)
+    height = width * original_height / original_width
+    x = _point(x, LEFT_MARGIN if name == "header" else (PAGE_WIDTH - width) / 2, f"{name} x")
+    y = _point(y, PAGE_HEIGHT - 24 - height if name == "header" else (PAGE_HEIGHT - height) / 2, f"{name} y")
+    if x + width > PAGE_WIDTH or y + height > PAGE_HEIGHT:
+        raise ValueError(f"{name} must fit inside the page")
+    return reader, x, y, width, height, _opacity(opacity, f"{name} opacity")
+
+
+def _custom_font_family(regular, bold, italic, bold_italic):
+    paths = [regular, bold, italic, bold_italic]
+    if not any(p is not None for p in paths):
+        return None
+    if regular is None:
+        raise ValueError("--font-regular is required when supplying custom font styles")
+    faces = []
+    for path in paths:
+        if path is None:
+            faces.append(None)
+            continue
+        path = Path(path).expanduser()
+        if path.suffix.lower() != ".ttf" or not path.is_file():
+            raise ValueError("Custom fonts must be existing local TTF files")
+        faces.append(path)
+    # Content-derived names avoid reusing the wrong face across conversions.
+    digest = hashlib.sha256(b"|".join(hashlib.sha256(p.read_bytes()).digest() if p else b"missing" for p in faces)).hexdigest()[:16]
+    base = f"MDCustom{digest}"
+    faces[1] = faces[1] or faces[0]
+    faces[2] = faces[2] or faces[0]
+    faces[3] = faces[3] or faces[1]
+    try:
+        for (style, suffix), path in zip(_STYLE_SUFFIX.items(), faces):
+            pdfmetrics.registerFont(TTFont(base + suffix, str(path)))
+        pdfmetrics.registerFontFamily(base, normal=base, bold=base + "-Bold", italic=base + "-Italic", boldItalic=base + "-BoldItalic")
+    except Exception as err:
+        raise ValueError("Cannot read custom TTF font") from err
+    return base
+
+
+@contextlib.contextmanager
+def _conversion_layout(*, margins, fonts):
+    """Scope legacy parser geometry and typography to this conversion."""
+    names = ("LEFT_MARGIN", "RIGHT_MARGIN", "TOP_MARGIN", "BOTTOM_MARGIN", "CONTENT_WIDTH", "CONTENT_HEIGHT", "BODY_FONT", "BODY_FONT_BOLD", "BODY_FONT_ITALIC", "HEADING_FONT", "HEADING_FONT_BOLD", "_LINK_BASE_DIR", "_BLACK_TEXT")
+    saved = {name: globals()[name] for name in names}
+    try:
+        for name, value in zip(names[:4], margins):
+            globals()[name] = value
+        globals()["CONTENT_WIDTH"] = PAGE_WIDTH - margins[0] - margins[1] - 2 * FRAME_PADDING
+        globals()["CONTENT_HEIGHT"] = PAGE_HEIGHT - margins[2] - margins[3] - 2 * FRAME_PADDING
+        if fonts:
+            for name in ("BODY_FONT", "HEADING_FONT"):
+                globals()[name] = fonts
+            for name in ("BODY_FONT_BOLD", "HEADING_FONT_BOLD"):
+                globals()[name] = fonts + "-Bold"
+            globals()["BODY_FONT_ITALIC"] = fonts + "-Italic"
+        yield
+    finally:
+        globals().update(saved)
+
+
+def _draw_decorations(canvas, doc, *, header, watermark, footer):
+    for image in (watermark, header):
+        if image:
+            reader, x, y, width, height, opacity = image
+            canvas.saveState()
+            canvas.setFillAlpha(opacity)
+            canvas.setStrokeAlpha(opacity)
+            canvas.drawImage(reader, x, y, width, height, mask="auto")
+            canvas.restoreState()
+    if footer:
+        paragraph, x, y, width, height, opacity = footer
+        canvas.saveState()
+        canvas.setFillAlpha(opacity)
+        canvas.setStrokeAlpha(opacity)
+        paragraph.wrap(width, height)
+        paragraph.drawOn(canvas, x, y)
+        canvas.restoreState()
+
+
 class NumberedCanvas(Canvas):
     """A canvas that stamps its number on every page of a multi-page document.
 
@@ -3290,6 +3465,7 @@ class NumberedCanvas(Canvas):
     """
 
     def __init__(self, *args, **kwargs):
+        self._decoration_footer = kwargs.pop("decoration_footer", None)
         super().__init__(*args, **kwargs)
         self._saved_pages: list[dict] = []
 
@@ -3302,7 +3478,16 @@ class NumberedCanvas(Canvas):
         total = len(self._saved_pages)
         for number, state in enumerate(self._saved_pages, start=1):
             self.__dict__.update(state)
-            draw_page_footer(self, number, total)
+            if self._decoration_footer:
+                text = page_number_text(number, total)
+                if text:
+                    self.saveState()
+                    self.setFont(HEADING_FONT, FOOTER_FONT_SIZE)
+                    self.setFillColor(FOOTER_COLOR)
+                    self.drawRightString(PAGE_WIDTH - RIGHT_MARGIN - FRAME_PADDING, self._decoration_footer[2], text)
+                    self.restoreState()
+            else:
+                draw_page_footer(self, number, total)
             super().showPage()
         super().save()
 
@@ -3316,45 +3501,102 @@ def convert_markdown_to_pdf(
     font_shrink: float = 0.0,
     agenda_tables: bool = False,
     black_text: bool = False,
+    header: Path | None = None,
+    header_x: float | None = None,
+    header_y: float | None = None,
+    header_width: float | None = None,
+    header_opacity: float | None = None,
+    watermark: Path | None = None,
+    watermark_x: float | None = None,
+    watermark_y: float | None = None,
+    watermark_width: float | None = None,
+    watermark_opacity: float | None = None,
+    footer: str | None = None,
+    footer_x: float | None = None,
+    footer_y: float | None = None,
+    footer_width: float | None = None,
+    footer_opacity: float | None = None,
+    copyright_callout: str | None = None,
+    font_regular: Path | None = None,
+    font_bold: Path | None = None,
+    font_italic: Path | None = None,
+    font_bold_italic: Path | None = None,
+    margin_left: float | None = None,
+    margin_right: float | None = None,
+    margin_top: float | None = None,
+    margin_bottom: float | None = None,
+    deterministic: bool = False,
 ) -> Path:
     if markdown_path.suffix.lower() != ".md":
-        raise ValueError(
-            f"Input file must have a .md extension, got: {markdown_path.name}"
-        )
+        raise ValueError(f"Input file must have a .md extension, got: {markdown_path.name}")
     if not markdown_path.exists():
         raise FileNotFoundError(f"Markdown file not found: {markdown_path}")
-    # Relative file links and images resolve against the Markdown file's own
-    # folder, independent of the shell's current working directory.
-    global _LINK_BASE_DIR
-    _LINK_BASE_DIR = str(markdown_path.resolve().parent)
-    output_path = resolve_output_path(markdown_path, output_path)
-    if output_path.exists() and not _prompt_overwrite(output_path):
-        output_path = versioned_path(output_path)
-
-    markdown = normalize_text(markdown_path.read_text(encoding="utf-8"))
-    story = parse_markdown(
-        markdown,
-        table_borders=table_borders,
-        compact_tables=compact_tables,
-        font_shrink=font_shrink,
-        agenda_tables=agenda_tables,
-        black_text=black_text,
-    )
-    # Bind every diagram to its caption and glossary before the document is
-    # paginated, so a figure and its explanation cannot land on facing pages.
-    story = group_diagram_figures(story, make_styles(font_shrink=font_shrink))
-
-    doc = SimpleDocTemplate(
-        str(output_path),
-        pagesize=letter,
-        leftMargin=LEFT_MARGIN,
-        rightMargin=RIGHT_MARGIN,
-        topMargin=TOP_MARGIN,
-        bottomMargin=BOTTOM_MARGIN,
-        title=output_path.stem,
-        author="markdown-to-pdf",
-    )
-    doc.build(story, canvasmaker=NumberedCanvas)
+    margins = [_point(value, default, f"{side} margin") for value, default, side in zip(
+        (margin_left, margin_right, margin_top, margin_bottom),
+        (LEFT_MARGIN, RIGHT_MARGIN, TOP_MARGIN, BOTTOM_MARGIN),
+        ("left", "right", "top", "bottom"))]
+    fonts = _custom_font_family(font_regular, font_bold, font_italic, font_bold_italic)
+    # All decoration validation precedes output resolution and overwrite prompts.
+    with _conversion_layout(margins=margins, fonts=fonts):
+        header_image = _decoration_image(header, header_x, header_y, header_width, header_opacity, "header")
+        watermark_image = _decoration_image(watermark, watermark_x, watermark_y, watermark_width, watermark_opacity, "watermark")
+        footer_spec = None
+        if footer is not None:
+            x = _point(footer_x, LEFT_MARGIN, "footer x")
+            y = _point(footer_y, 20, "footer y")
+            width = _point(footer_width, PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - 45, "footer width", positive=True)
+            opacity = _opacity(footer_opacity, "footer opacity")
+            style = ParagraphStyle("MDDecorationFooter", fontName=BODY_FONT, fontSize=9, leading=11, textColor=FOOTER_COLOR)
+            text = Paragraph(decoration_markup(footer), style)
+            # Paragraph sets each fragment's color while drawing, so carry the
+            # requested alpha on its colors as well as on the canvas state.
+            for fragment in text.frags:
+                for attribute in ("textColor", "backColor"):
+                    color = getattr(fragment, attribute, None)
+                    if color is not None:
+                        color = copy.copy(color)
+                        color.alpha = opacity
+                        setattr(fragment, attribute, color)
+            _, height = text.wrap(width, PAGE_HEIGHT)
+            if x + width > PAGE_WIDTH or y + height > PAGE_HEIGHT:
+                raise ValueError("footer must fit inside the page")
+            footer_spec = text, x, y, width, height, opacity
+            margins[3] = max(margins[3], y + height + 10)
+        elif any(v is not None for v in (footer_x, footer_y, footer_width, footer_opacity)):
+            raise ValueError("footer controls require --footer")
+        callout_markup = decoration_markup(copyright_callout) if copyright_callout is not None else None
+        if header_image:
+            margins[2] = max(margins[2], PAGE_HEIGHT - header_image[2] + 10)
+        if PAGE_WIDTH - margins[0] - margins[1] - 2 * FRAME_PADDING < 48 or PAGE_HEIGHT - margins[2] - margins[3] - 2 * FRAME_PADDING < 48:
+            raise ValueError("Margins and decorations must leave at least 48 points of content width and height")
+        with _conversion_layout(margins=margins, fonts=fonts):
+            global _LINK_BASE_DIR
+            _LINK_BASE_DIR = str(markdown_path.resolve().parent)
+            markdown = normalize_text(markdown_path.read_text(encoding="utf-8"))
+            story = parse_markdown(markdown, table_borders=table_borders, compact_tables=compact_tables,
+                font_shrink=font_shrink, agenda_tables=agenda_tables, black_text=black_text)
+            story = group_diagram_figures(story, make_styles(font_shrink=font_shrink))
+            if callout_markup is not None:
+                callout = Table([[Paragraph(callout_markup, ParagraphStyle("MDRightsCallout",
+                    fontName=BODY_FONT, fontSize=9, leading=13, textColor=BLACK))]], colWidths=[CONTENT_WIDTH])
+                callout.setStyle(TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
+                    ("BOX", (0, 0), (-1, -1), .5, colors.HexColor("#CBD5E1")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 12), ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                    ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+                ]))
+                if callout.wrap(CONTENT_WIDTH, CONTENT_HEIGHT)[1] > CONTENT_HEIGHT:
+                    raise ValueError("Copyright callout must fit on the first page")
+                story = [callout, Spacer(1, 14), *story]
+            output_path = resolve_output_path(markdown_path, output_path)
+            if output_path.exists() and not _prompt_overwrite(output_path):
+                output_path = versioned_path(output_path)
+            doc = SimpleDocTemplate(str(output_path), pagesize=letter,
+                leftMargin=LEFT_MARGIN, rightMargin=RIGHT_MARGIN, topMargin=TOP_MARGIN, bottomMargin=BOTTOM_MARGIN,
+                title=output_path.stem, author="markdown-to-pdf", invariant=deterministic)
+            callback = partial(_draw_decorations, header=header_image, watermark=watermark_image, footer=footer_spec)
+            canvasmaker = partial(NumberedCanvas, decoration_footer=footer_spec) if footer_spec else NumberedCanvas
+            doc.build(story, onFirstPage=callback, onLaterPages=callback, canvasmaker=canvasmaker)
     return output_path
 
 
@@ -3365,6 +3607,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="markdown-to-pdf",
         description="Convert a markdown file to a styled PDF.",
+        epilog="Examples: markdown-to-pdf guide.md --out guide.pdf; "
+        "markdown-to-pdf guide.md --header logo.png --footer 'Confidential' "
+        "--copyright-callout '**All rights reserved.**' --deterministic. "
+        "Coordinates and margins use PDF points from the bottom-left. "
+        "Decoration text accepts inline Markdown or safe HTML: b/strong, i/em, u, br, p, "
+        'and font color="#RRGGBB". Other tags, attributes, links, and images are rejected.',
     )
     parser.add_argument(
         "--version",
@@ -3417,6 +3665,24 @@ def main() -> None:
         action="store_true",
         help="Agenda mode. Bundles --no-table-borders + --compact-tables and zeroes LEFTPADDING on table cells — the styling the /todo agenda PDF requires. Use this for any agenda regeneration so the styling can't be forgotten by individual callers.",
     )
+    for element in ("header", "watermark", "footer"):
+        parser.add_argument(f"--{element}", type=str if element == "footer" else Path,
+            help="Text repeated on every page (9pt default)." if element == "footer" else f"Local raster image repeated as a {element}; aspect ratio is preserved.")
+        for control in ("x", "y", "width", "opacity"):
+            descriptions = {
+                "x": "Lower-left x coordinate in PDF points (default: left margin; watermark: centered).",
+                "y": "Lower-left y coordinate in PDF points (default: header 24pt below page top; watermark centered; footer 20pt).",
+                "width": "Width in PDF points (default: header 120; watermark 300; footer content width less 45).",
+                "opacity": "Opacity from 0 (invisible) to 1 (opaque); default 1.",
+            }
+            parser.add_argument(f"--{element}-{control}", type=float, help=descriptions[control])
+    parser.add_argument("--copyright-callout", help="Inline Markdown or safe HTML notice in a shaded box once, before document content.")
+    for face in ("regular", "bold", "italic", "bold-italic"):
+        parser.add_argument(f"--font-{face}", type=Path,
+            help=f"Local {face} TTF. Custom styles require --font-regular; missing styles use regular (bold-italic uses bold). Code font stays unchanged.")
+    for side, default in (("left", LEFT_MARGIN), ("right", RIGHT_MARGIN), ("top", TOP_MARGIN), ("bottom", BOTTOM_MARGIN)):
+        parser.add_argument(f"--margin-{side}", type=float, help=f"{side.capitalize()} margin in PDF points (default {default}); header/footer reserve extra space as needed.")
+    parser.add_argument("--deterministic", action="store_true", help="Produce stable PDF bytes for unchanged input, options, assets, and output filename.")
     args = parser.parse_args()
     if args.output is not None and args.out is not None:
         parser.error("cannot use output together with --out; specify only one output destination")
@@ -3436,6 +3702,9 @@ def main() -> None:
             font_shrink=args.font_shrink,
             agenda_tables=agenda_tables,
             black_text=args.black_text,
+            **{key: value for key, value in vars(args).items() if key.startswith(("header", "watermark", "footer", "margin_", "font_")) and key != "font_shrink"},
+            copyright_callout=args.copyright_callout,
+            deterministic=args.deterministic,
         )
     except (ValueError, FileNotFoundError) as err:
         print(_color(f"error: {err}", _Color.RED, _Color.BOLD, stream=sys.stderr), file=sys.stderr)

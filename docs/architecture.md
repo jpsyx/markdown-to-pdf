@@ -160,6 +160,22 @@ absolute checkout path and can be run directly by anyone.
   laid out, which is after page one has been drawn. `NumberedCanvas` therefore
   holds each finished page as saved canvas state and replays them from
   `save()`, adding the footer once the count is known.
+- **Decorations** (`decoration_markup`, `_decoration_image`,
+  `_custom_font_family`, `_conversion_layout`, `_draw_decorations`): validate
+  local raster artwork, finite geometry/opacity, safe text markup, and local
+  TTFs before selecting or opening an output. The text parser allows only a
+  small HTML subset plus inline Markdown and never accepts resource-bearing
+  tags or links. Per-conversion layout scopes restore the existing global
+  font/geometry values, even on failure, so the legacy block builders use the
+  selected margins without leaking them into another conversion. Font names
+  derive from file content; every custom family registers all four styles,
+  falling back within that family rather than mixing unrelated typefaces.
+  A page callback paints the watermark first, then the header and footer,
+  before document flowables. Header/footer geometry reserves space in the
+  text frame. A shaded callout flowable is prepended exactly once. The numbered
+  canvas keeps its existing two-pass behavior and moves numbers right only
+  when a custom footer is present. ReportLab invariant mode is opt-in through
+  `--deterministic`; no default decoration or typography changes occur.
 - **Output** (`resolve_output_path`, `versioned_path`, `_prompt_overwrite`,
   `convert_markdown_to_pdf`, `main`): resolve a file or directory output path
   (non-interactive mode writes a `-vN` variant
@@ -184,3 +200,9 @@ renderer resolves), because both features degrade silently when the dependency
 is absent and no behavioral test would notice. New parsing behavior
 should be added test-first here (red/green). The rendering/IO layers are
 exercised by running the tool on real Markdown.
+
+Decoration tests decode real PDF content streams and assert image transforms,
+paint order, repeated footer content, effective text opacity, first-page-only
+notices, custom fonts, margins, state restoration, deterministic bytes, and
+validation before destination creation. They use ReportLab's bundled Vera TTFs
+and generated local raster fixtures, without a PDF-reader dependency.
