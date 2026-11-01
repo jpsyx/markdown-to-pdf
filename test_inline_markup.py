@@ -2697,6 +2697,17 @@ class HtmlTables(unittest.TestCase):
         inner_table = main.parse_markdown(f"> **Blast radius**\n>\n{quoted}\n")[0]._cellvalues[0][0][1]
         self.assertEqual(inner_table._cellStyles[1][0].topPadding, 1)
 
+    def test_border_zero_draws_no_lines_or_header_fill(self):
+        borderless = self.TABLE.replace("<table>", '<table border="0">')
+        table = main.parse_markdown(f"> {borderless.replace(chr(10), '')}\n")[0]._cellvalues[0][0][0]
+        commands = [cmd[0] for cmd in table._linecmds] + [cmd[0] for cmd in table._bkgrndcmds]
+        self.assertNotIn("GRID", commands)
+        self.assertNotIn("BACKGROUND", commands)
+
+    def test_a_table_without_border_zero_keeps_its_grid(self):
+        table = main.parse_markdown(f"{self.TABLE}\n")[0]
+        self.assertIn("GRID", [cmd[0] for cmd in table._linecmds])
+
     def test_a_prose_callout_is_still_one_paragraph(self):
         box = main.parse_markdown("> one\n> two\n")[0]
         self.assertIsInstance(box._cellvalues[0][0], Paragraph)

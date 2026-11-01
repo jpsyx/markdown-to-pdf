@@ -199,8 +199,9 @@ honor the same line, and GitHub shows nothing.
 A raw HTML `<table>`, from the line that opens it to the line holding
 `</table>`, renders like a Markdown table, and a cell's `colspan` merges it
 across that many columns, which a Markdown table cannot do. A leading row of
-`<th>` cells is the header. Cell text keeps its inline Markdown, and every
-other attribute is ignored. The same table may sit inside a block quote: a
+`<th>` cells is the header. `<table border="0">` draws no grid and no header
+fill, so the table only lays out its cells. Cell text keeps its inline
+Markdown, and every other attribute is ignored. The same table may sit inside a block quote: a
 quote holding a table, HTML or Markdown, prints its paragraphs and the table
 together in the shaded callout box, the table in compact rows, where an
 ordinary multi-line quote prints as one paragraph.

@@ -33,7 +33,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 import argparse
 import hashlib
@@ -882,6 +882,9 @@ _IMAGE_BLOCK_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
 # A raw HTML table starts at a line opening with `<table` and runs to the line
 # that closes it, which may be the same line.
 _HTML_TABLE_OPEN_RE = re.compile(r"<table\b", re.I)
+# `<table border="0">` asks for a table that only lays its cells out: no grid
+# and no header fill.
+_BORDERLESS_HTML_TABLE_RE = re.compile(r"<table\b[^>]*\bborder\s*=\s*[\"']?0[\"'\s>]", re.I)
 _URI_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 _EXTERNAL_HREF_RE = re.compile(r"^(?:https?|mailto|tel|ftp|file):", re.IGNORECASE)
 
@@ -3211,9 +3214,11 @@ def parse_markdown(
             j = i
             while j < len(raw_lines) and "</table>" not in raw_lines[j].lower():
                 j += 1
-            rows = parse_html_table("\n".join(raw_lines[i:j + 1]))
+            markup = "\n".join(raw_lines[i:j + 1])
+            rows = parse_html_table(markup)
             if rows:
-                story.append(render_html_table(rows, styles, borders=table_borders, compact=compact_tables))
+                borders = table_borders and not _BORDERLESS_HTML_TABLE_RE.match(markup)
+                story.append(render_html_table(rows, styles, borders=borders, compact=compact_tables))
             i = j + 1
             continue
 
