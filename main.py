@@ -33,7 +33,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.16.1"
+__version__ = "0.17.0"
 
 import argparse
 import hashlib
@@ -879,6 +879,9 @@ def _emphasis_and_superscripts(text: str) -> str:
 # Target is any run without whitespace or a closing paren.
 _LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)")
 _IMAGE_BLOCK_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
+# A raw HTML table starts at a line opening with `<table` and runs to the line
+# that closes it, which may be the same line.
+_HTML_TABLE_OPEN_RE = re.compile(r"<table\b", re.I)
 _URI_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 _EXTERNAL_HREF_RE = re.compile(r"^(?:https?|mailto|tel|ftp|file):", re.IGNORECASE)
 
@@ -1271,17 +1274,33 @@ def paragraph(text: str, style: ParagraphStyle) -> Paragraph:
     return Paragraph(inline_markup(text), _hang_leading_emoji(text, style))
 
 
-def callout_box(lines: Iterable[str], style: ParagraphStyle) -> Table:
-    text = " ".join(line.strip() for line in lines if line.strip())
-    cell = Paragraph(inline_markup(text), style)
-    table = Table([[cell]], colWidths=[PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - _BLOCK_INDENT])
+CALLOUT_PADDING = 12.0
+
+
+def _opens_quoted_table(line: str) -> bool:
+    return line.startswith("|") or _HTML_TABLE_OPEN_RE.match(line) is not None
+
+
+def callout_blocks_box(lines: list[str], styles: dict[str, ParagraphStyle]) -> Table:
+    """A callout that holds a table: the quote's lines, `>` prefixes removed,
+    parsed as blocks of their own, inside the callout's shaded box. Its table
+    takes compact rows, since a callout is a note beside the prose."""
+    with indented_blocks(2 * CALLOUT_PADDING):
+        content = parse_markdown("\n".join(lines), compact_tables=True, _styles=styles)
+    if content:
+        content[-1].spaceAfter = 0
+    return _callout_frame(content)
+
+
+def _callout_frame(content: Flowable | list[Flowable]) -> Table:
+    table = Table([[content]], colWidths=[PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - _BLOCK_INDENT])
     table.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, -1), CALLOUT_FILL),
                 ("BOX", (0, 0), (-1, -1), 1.0, CALLOUT_BORDER),
-                ("LEFTPADDING", (0, 0), (-1, -1), 12),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ("LEFTPADDING", (0, 0), (-1, -1), CALLOUT_PADDING),
+                ("RIGHTPADDING", (0, 0), (-1, -1), CALLOUT_PADDING),
                 ("TOPPADDING", (0, 0), (-1, -1), 9),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
             ]
@@ -1291,6 +1310,11 @@ def callout_box(lines: Iterable[str], style: ParagraphStyle) -> Table:
     table.spaceBefore = 0
     table.spaceAfter = 12
     return table
+
+
+def callout_box(lines: Iterable[str], style: ParagraphStyle) -> Table:
+    text = " ".join(line.strip() for line in lines if line.strip())
+    return _callout_frame(Paragraph(inline_markup(text), style))
 
 
 # A blockquote straight after a diagram or an image is that figure's caption.
@@ -2656,6 +2680,86 @@ def render_table(
     return table
 
 
+class HtmlTableCell:
+    """One `<th>` or `<td>` of a raw HTML table: its text, how many columns it
+    spans, and whether it is a header cell."""
+
+    def __init__(self, text: str, colspan: int, header: bool) -> None:
+        self.text = text
+        self.colspan = colspan
+        self.header = header
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, HtmlTableCell) and (
+            (self.text, self.colspan, self.header) == (other.text, other.colspan, other.header)
+        )
+
+
+class _HtmlTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[HtmlTableCell]] = []
+        self._cell: HtmlTableCell | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            self.rows.append([])
+        elif tag in ("th", "td"):
+            if not self.rows:
+                self.rows.append([])
+            span = dict(attrs).get("colspan") or "1"
+            colspan = max(1, int(span)) if span.isdigit() else 1
+            self._cell = HtmlTableCell("", colspan, tag == "th")
+            self.rows[-1].append(self._cell)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("th", "td") and self._cell is not None:
+            self._cell.text = " ".join(self._cell.text.split())
+            self._cell = None
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.text += data
+
+
+def parse_html_table(markup: str) -> list[list[HtmlTableCell]]:
+    """The rows of a raw HTML `<table>`. Cell text keeps its inline Markdown,
+    and a `colspan` is the only attribute read."""
+    parser = _HtmlTableParser()
+    parser.feed(markup)
+    parser.close()
+    return [row for row in parser.rows if row]
+
+
+def render_html_table(
+    rows: list[list[HtmlTableCell]],
+    styles: dict[str, ParagraphStyle],
+    *,
+    borders: bool = True,
+    compact: bool = False,
+) -> Table:
+    """Render a raw HTML table like a GFM one, merging each spanned cell.
+
+    A leading row of `<th>` cells is the header row. A spanned cell's text
+    sits in its first column and the columns it covers are merged with it.
+    """
+    n_cols = max(sum(cell.colspan for cell in row) for row in rows)
+    grid: list[list[str]] = []
+    spans: list[tuple[int, int, int]] = []
+    for r, row in enumerate(rows):
+        cells: list[str] = []
+        for cell in row:
+            if cell.colspan > 1:
+                spans.append((r, len(cells), min(n_cols, len(cells) + cell.colspan) - 1))
+            cells.extend([cell.text] + [""] * (cell.colspan - 1))
+        grid.append(cells[:n_cols])
+    has_header = all(cell.header for cell in rows[0])
+    header, body = (grid[0], grid[1:]) if has_header else ([""] * n_cols, grid)
+    table = render_table(header, body, ["LEFT"] * n_cols, styles, borders=borders, compact=compact)
+    table.setStyle(TableStyle([("SPAN", (start, r), (end, r)) for r, start, end in spans]))
+    return table
+
+
 def flush_paragraph(buffer: list[str], story: list[Flowable], styles: dict[str, ParagraphStyle]) -> None:
     if buffer:
         story.append(paragraph(join_soft_lines(buffer).strip(), styles["body"]))
@@ -2821,9 +2925,12 @@ def flush_bullets(
 
 def flush_quotes(buffer: list[str], story: list[Flowable], styles: dict[str, ParagraphStyle]) -> None:
     if buffer:
-        # Single-line block quotes render with a left blue bar and italic blue text;
-        # multi-line block quotes render as a filled callout box.
-        if len(buffer) == 1:
+        # A quote holding a table renders as a filled callout box of blocks.
+        # Otherwise a single-line quote renders with a left blue bar and italic
+        # blue text, and a multi-line quote as a filled callout paragraph.
+        if any(_opens_quoted_table(line) for line in buffer):
+            story.append(callout_blocks_box(buffer, styles))
+        elif len(buffer) == 1:
             story.append(blockquote(buffer[0].strip(), styles["quote_plain"]))
         else:
             story.append(callout_box(buffer, styles["callout"]))
@@ -3097,6 +3204,18 @@ def parse_markdown(
             continue
 
         flush_quotes(quote_buffer, story, styles)
+
+        if _HTML_TABLE_OPEN_RE.match(stripped):
+            flush_paragraph(paragraph_buffer, story, styles)
+            flush_list()
+            j = i
+            while j < len(raw_lines) and "</table>" not in raw_lines[j].lower():
+                j += 1
+            rows = parse_html_table("\n".join(raw_lines[i:j + 1]))
+            if rows:
+                story.append(render_html_table(rows, styles, borders=table_borders, compact=compact_tables))
+            i = j + 1
+            continue
 
         # GFM tables: a row of pipe-separated cells followed by a separator
         # row of `|---|---|`. The separator is the load-bearing signal — a

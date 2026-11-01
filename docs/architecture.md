@@ -72,7 +72,7 @@ absolute checkout path and can be run directly by anyone.
   wrapped bullet into its own one-item list with an orphaned paragraph after
   it, so `parse_markdown` also implements CommonMark lazy continuation: a line
   that neither opens a block nor starts an item folds onto the item above.
-- **Block builders** (`paragraph`, `callout_box`, `code_block`, `blockquote`,
+- **Block builders** (`paragraph`, `callout_box`, `callout_blocks_box`, `render_html_table`, `code_block`, `blockquote`,
   `render_table`, and the `flush_*` helpers): turn buffered lines into Flowables.
 - **Fence meta** (`parse_fence_info`): the text after ``` is a language plus an
   optional highlight spec, `{2,4-6}`, 1-based to match what a reader counts.

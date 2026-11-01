@@ -180,7 +180,7 @@ hyphens or slashes, and header words stay intact. Headers repeat on subsequent
 pages; ordinary rows stay together, while a row taller than a page can continue
 onto the next page.
 
-Three pieces of raw HTML are understood. An inline `<sup>G4</sup>` renders as a
+Four pieces of raw HTML are understood. An inline `<sup>G4</sup>` renders as a
 small raised superscript wherever text renders, including table cells and
 headings, which suits glossary markers placed right after a term; inside a code
 span or fence it stays literal. A `<small>` line and a `</small>` line, each on
@@ -195,6 +195,15 @@ Markdown has no page break, so the CSS idiom serves as one: a line holding only
 `break-before: page`, `break-after: page`) starts a new page, and does nothing
 at the top of a page, so it never leaves a blank one. HTML-based converters
 honor the same line, and GitHub shows nothing.
+
+A raw HTML `<table>`, from the line that opens it to the line holding
+`</table>`, renders like a Markdown table, and a cell's `colspan` merges it
+across that many columns, which a Markdown table cannot do. A leading row of
+`<th>` cells is the header. Cell text keeps its inline Markdown, and every
+other attribute is ignored. The same table may sit inside a block quote: a
+quote holding a table, HTML or Markdown, prints its paragraphs and the table
+together in the shaded callout box, the table in compact rows, where an
+ordinary multi-line quote prints as one paragraph.
 
 Fenced code blocks are syntax highlighted when the fence carries a language
 tag (```typescript, ```python, ```sql, ...); an untagged fence renders plain.

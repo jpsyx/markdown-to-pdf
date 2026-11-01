@@ -2618,5 +2618,89 @@ class PDFDecorations(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+class HtmlTables(unittest.TestCase):
+    """A raw HTML `<table>` renders as a table, with `colspan` merging cells,
+    on its own or inside a callout, so a header can group the columns under
+    it. GFM tables cannot span columns."""
+
+    TABLE = (
+        '<table>\n'
+        '<tr><th colspan="2">Files</th><th colspan="2">Lines</th></tr>\n'
+        '<tr><td>Changed</td><td>63</td><td>Added</td><td>8,231</td></tr>\n'
+        '</table>'
+    )
+
+    @staticmethod
+    def spans(table):
+        return [cmd[1:3] for cmd in table._spanCmds]
+
+    def test_parses_rows_cells_and_spans(self):
+        rows = main.parse_html_table(self.TABLE)
+        self.assertEqual(
+            [[(c.text, c.colspan, c.header) for c in row] for row in rows],
+            [[("Files", 2, True), ("Lines", 2, True)],
+             [("Changed", 1, False), ("63", 1, False), ("Added", 1, False), ("8,231", 1, False)]],
+        )
+
+    def test_a_table_on_one_line_parses_the_same(self):
+        one_line = self.TABLE.replace("\n", "")
+        self.assertEqual(main.parse_html_table(one_line), main.parse_html_table(self.TABLE))
+
+    def test_renders_a_table_with_spanned_header_cells(self):
+        story = main.parse_markdown(f"Before.\n\n{self.TABLE}\n\nAfter.\n")
+        tables = [f for f in story if isinstance(f, Table)]
+        self.assertEqual(len(tables), 1)
+        self.assertEqual(len(tables[0]._argW), 4)
+        self.assertEqual(self.spans(tables[0]), [((0, 0), (1, 0)), ((2, 0), (3, 0))])
+        self.assertFalse(any("&lt;t" in str(getattr(f, "text", "")) for f in story))
+
+    def test_a_callout_holding_a_table_boxes_its_heading_and_the_table(self):
+        quoted = "\n".join(f"> {line}" for line in self.TABLE.splitlines())
+        story = main.parse_markdown(f"> **Blast radius**\n>\n{quoted}\n")
+        self.assertEqual(len(story), 1)
+        box = story[0]
+        self.assertIn(("BACKGROUND", (0, 0), (-1, -1), main.CALLOUT_FILL),
+                      [cmd[:4] for cmd in box._bkgrndcmds])
+        inner = box._cellvalues[0][0]
+        self.assertIsInstance(inner[0], Paragraph)
+        self.assertIn("Blast radius", inner[0].text)
+        self.assertEqual(self.spans(inner[1]), [((0, 0), (1, 0)), ((2, 0), (3, 0))])
+
+    def test_a_callout_holding_only_a_table_boxes_the_table(self):
+        quoted = "\n".join(f"> {line}" for line in self.TABLE.splitlines())
+        story = main.parse_markdown(f"{quoted}\n")
+        self.assertEqual(len(story), 1)
+        inner = story[0]._cellvalues[0][0]
+        self.assertEqual(len(inner), 1)
+        self.assertEqual(self.spans(inner[0]), [((0, 0), (1, 0)), ((2, 0), (3, 0))])
+
+    def test_a_one_line_quoted_table_is_boxed_not_printed_as_markup(self):
+        story = main.parse_markdown("> " + self.TABLE.replace("\n", "") + "\n")
+        inner = story[0]._cellvalues[0][0]
+        self.assertEqual(self.spans(inner[0]), [((0, 0), (1, 0)), ((2, 0), (3, 0))])
+
+    def test_a_callout_table_fits_inside_the_box(self):
+        quoted = "\n".join(f"> {line}" for line in self.TABLE.splitlines())
+        box = main.parse_markdown(f"> **Blast radius**\n>\n{quoted}\n")[0]
+        inner_table = box._cellvalues[0][0][1]
+        self.assertLessEqual(sum(inner_table._argW), box._argW[0] - 24 + 0.01)
+
+    def test_a_small_region_shrinks_the_callout_table(self):
+        quoted = "\n".join(f"> {line}" for line in self.TABLE.splitlines())
+        plain = main.parse_markdown(f"> **Blast radius**\n>\n{quoted}\n")[0]
+        small = main.parse_markdown(f"<small>\n\n> **Blast radius**\n>\n{quoted}\n\n</small>\n")[0]
+        size = lambda box: box._cellvalues[0][0][1]._cellvalues[1][0].style.fontSize
+        self.assertLess(size(small), size(plain))
+
+    def test_a_callout_table_uses_compact_rows(self):
+        quoted = "\n".join(f"> {line}" for line in self.TABLE.splitlines())
+        inner_table = main.parse_markdown(f"> **Blast radius**\n>\n{quoted}\n")[0]._cellvalues[0][0][1]
+        self.assertEqual(inner_table._cellStyles[1][0].topPadding, 1)
+
+    def test_a_prose_callout_is_still_one_paragraph(self):
+        box = main.parse_markdown("> one\n> two\n")[0]
+        self.assertIsInstance(box._cellvalues[0][0], Paragraph)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
