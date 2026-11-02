@@ -33,7 +33,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.18.0"
+__version__ = "0.19.0"
 
 import argparse
 import hashlib
@@ -847,32 +847,34 @@ def _emphasis(text: str) -> str:
     return "".join(parts)
 
 
-# Raw HTML `<sup>` reaches this point already escaped, since code spans were
-# pulled out first and stay literal. Only a matched pair becomes a superscript;
-# a stray open or close tag keeps printing as text. Size and rise are relative,
-# so a marker stays in proportion in headings and in shrunken table type.
-_SUPERSCRIPT_RE = re.compile(r"&lt;sup&gt;(.*?)&lt;/sup&gt;", re.IGNORECASE | re.S)
+# Raw HTML `<sup>` and inline `<small>` reach this point already escaped, since
+# code spans were pulled out first and stay literal. Only a matched pair is
+# rendered; a stray open or close tag keeps printing as text. Sizes and rise are
+# relative, so a marker stays in proportion in headings and in shrunken table
+# type. An inline `<small>` sits on the baseline, for a reference such as
+# `[ABC-123]` that should read quieter than its sentence without being raised.
+_INLINE_HTML_RE = re.compile(r"&lt;(sup|small)&gt;(.*?)&lt;/\1&gt;", re.IGNORECASE | re.S)
 SUPERSCRIPT_OPEN = '<super size="70%" rise="40%">'
+INLINE_SMALL_OPEN = '<font size="-2">'
+_INLINE_HTML_TAGS = {"sup": (SUPERSCRIPT_OPEN, "</super>"), "small": (INLINE_SMALL_OPEN, "</font>")}
 
 
 def _emphasis_and_superscripts(text: str) -> str:
-    """Apply emphasis to escaped text and render matched `<sup>` pairs.
+    """Apply emphasis to escaped text and render matched `<sup>` and `<small>` pairs.
 
-    Each superscript gets its own emphasis pass behind a placeholder, so a
-    delimiter can never pair across its boundary and emit crossing tags.
+    Each pair gets its own emphasis pass behind a placeholder, so a delimiter
+    can never pair across its boundary and emit crossing tags. A pair's content
+    takes the same pass, so a `<sup>` nests inside a `<small>`.
     """
-    superscripts: list[str] = []
+    spans: list[str] = []
 
     def stash(match: re.Match) -> str:
-        superscripts.append(_emphasis(match.group(1)))
-        return f"\x04SUP{len(superscripts) - 1}\x04"
+        opening, closing = _INLINE_HTML_TAGS[match.group(1).lower()]
+        spans.append(f"{opening}{_emphasis_and_superscripts(match.group(2))}{closing}")
+        return f"\x04SUP{len(spans) - 1}\x04"
 
-    text = _emphasis(_SUPERSCRIPT_RE.sub(stash, text))
-    return re.sub(
-        r"\x04SUP(\d+)\x04",
-        lambda match: f"{SUPERSCRIPT_OPEN}{superscripts[int(match.group(1))]}</super>",
-        text,
-    )
+    text = _emphasis(_INLINE_HTML_RE.sub(stash, text))
+    return re.sub(r"\x04SUP(\d+)\x04", lambda match: spans[int(match.group(1))], text)
 
 
 # Markdown inline link: [text](target). Not preceded by ! (that's an image).
@@ -2615,6 +2617,23 @@ class _ReadableTable(Table):
         return []
 
 
+# Agenda tables are layout grids a reader scans, not studies, so their type
+# drops below body size. `_fit_table` lowers the leading with the size, down to
+# its readable floor, and never sets type below MIN_TABLE_FONT_SIZE.
+AGENDA_TABLE_SHRINK = 1.5
+
+
+def _agenda_table_styles(styles: dict[str, ParagraphStyle]) -> dict[str, ParagraphStyle]:
+    """Copies of the table styles set AGENDA_TABLE_SHRINK points smaller."""
+    shrunk = dict(styles)
+    for key in _SMALL_TABLE_STYLES:
+        style = copy.copy(styles[key])
+        style.fontSize = max(MIN_TABLE_FONT_SIZE, styles[key].fontSize - AGENDA_TABLE_SHRINK)
+        style.leading = styles[key].leading - 2 * (styles[key].fontSize - style.fontSize)
+        shrunk[key] = style
+    return shrunk
+
+
 def render_table(
     header: list[str],
     rows: list[list[str]],
@@ -2647,8 +2666,10 @@ def render_table(
 
     With `agenda_tables=True`, the table's left padding goes to zero so
     cells in the dense Today's habits / Completed today grids align with
-    the page-left margin. Agenda-only by construction (wired exclusively
-    from `--agenda`); other callers' tables are untouched.
+    the page-left margin, its type drops AGENDA_TABLE_SHRINK points, and
+    cells lose their vertical padding, so an agenda's layout grids stay
+    short. Agenda-only by construction (wired exclusively from `--agenda`);
+    other callers' tables are untouched.
     """
     n_cols = max(len(header), max((len(r) for r in rows), default=0), 1)
     header = header + [""] * (n_cols - len(header))
@@ -2656,7 +2677,9 @@ def render_table(
     alignments = alignments + ["LEFT"] * (n_cols - len(alignments))
 
     header_is_empty = all(not cell.strip() for cell in header)
-    top_pad, bot_pad = (1, 1) if compact else (6, 6)
+    top_pad, bot_pad = (0, 0) if agenda_tables else (1, 1) if compact else (6, 6)
+    if agenda_tables:
+        styles = _agenda_table_styles(styles)
     left_pad = 0 if agenda_tables else 8
     right_pad = 8
     data, col_widths = _fit_table(header, rows, styles, left_pad + right_pad)
@@ -2740,6 +2763,7 @@ def render_html_table(
     *,
     borders: bool = True,
     compact: bool = False,
+    agenda_tables: bool = False,
 ) -> Table:
     """Render a raw HTML table like a GFM one, merging each spanned cell.
 
@@ -2758,7 +2782,8 @@ def render_html_table(
         grid.append(cells[:n_cols])
     has_header = all(cell.header for cell in rows[0])
     header, body = (grid[0], grid[1:]) if has_header else ([""] * n_cols, grid)
-    table = render_table(header, body, ["LEFT"] * n_cols, styles, borders=borders, compact=compact)
+    table = render_table(header, body, ["LEFT"] * n_cols, styles, borders=borders, compact=compact,
+                         agenda_tables=agenda_tables)
     table.setStyle(TableStyle([("SPAN", (start, r), (end, r)) for r, start, end in spans]))
     return table
 
@@ -3218,7 +3243,8 @@ def parse_markdown(
             rows = parse_html_table(markup)
             if rows:
                 borders = table_borders and not _BORDERLESS_HTML_TABLE_RE.match(markup)
-                story.append(render_html_table(rows, styles, borders=borders, compact=compact_tables))
+                story.append(render_html_table(rows, styles, borders=borders, compact=compact_tables,
+                                               agenda_tables=agenda_tables))
             i = j + 1
             continue
 
@@ -3787,7 +3813,7 @@ def main() -> None:
         "--agenda",
         dest="agenda",
         action="store_true",
-        help="Agenda mode. Bundles --no-table-borders + --compact-tables and zeroes LEFTPADDING on table cells — the styling the /todo agenda PDF requires. Use this for any agenda regeneration so the styling can't be forgotten by individual callers.",
+        help="Agenda mode. Bundles --no-table-borders + --compact-tables, zeroes table cell left and vertical padding, and sets table type 1.5pt smaller — the styling the /todo agenda PDF requires. Use this for any agenda regeneration so the styling can't be forgotten by individual callers.",
     )
     for element in ("header", "watermark", "footer"):
         parser.add_argument(f"--{element}", type=str if element == "footer" else Path,

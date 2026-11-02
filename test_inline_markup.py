@@ -2082,6 +2082,110 @@ class PageNumbers(unittest.TestCase):
             self.assertEqual(drawn, [(n + 1, total) for n in range(total)])
 
 
+class AgendaTables(unittest.TestCase):
+    """Agenda-mode tables are dense, borderless layout grids."""
+
+    HABITS = "|  |  |\n|---|---|\n| ◻ **H1** Morning walk | ◻ **H2** Water the plants |\n| ◻ **H3** Read for twenty minutes | ✅ **H4** Stretch |\n"
+    HTML = "<table><tr><th>Publisher</th><th>Emails</th></tr><tr><td>TLDR</td><td>2</td></tr></table>\n"
+
+    def tables(self, source, **options):
+        return [f for f in main.parse_markdown(source, **options) if isinstance(f, main.Table)]
+
+    def agenda(self, source):
+        return self.tables(source, table_borders=False, compact_tables=True, agenda_tables=True)
+
+    def cell_paragraph(self, table):
+        return table._cellvalues[-1][0]
+
+    def test_agenda_table_text_is_smaller_than_an_ordinary_table(self):
+        agenda = self.cell_paragraph(self.agenda(self.HABITS)[0])
+        ordinary = self.cell_paragraph(self.tables(self.HABITS)[0])
+        self.assertLessEqual(agenda.style.fontSize, ordinary.style.fontSize - 1.5)
+        self.assertGreaterEqual(agenda.style.fontSize, main.MIN_TABLE_FONT_SIZE)
+        self.assertLess(agenda.style.leading, ordinary.style.leading)
+
+    def test_agenda_table_cells_have_no_vertical_padding(self):
+        cell = self.agenda(self.HABITS)[0]._cellStyles[0][0]
+        self.assertEqual((cell.topPadding, cell.bottomPadding), (0, 0))
+
+    def test_agenda_table_draws_no_lines(self):
+        table = self.agenda(self.HABITS)[0]
+        self.assertEqual(table._linecmds, [])
+        self.assertEqual(table._bkgrndcmds, [])
+
+    def test_html_tables_get_the_agenda_styling_too(self):
+        agenda = self.agenda(self.HTML)[0]
+        ordinary = self.tables(self.HTML)[0]
+        self.assertEqual(agenda._linecmds, [])
+        self.assertEqual(agenda._cellStyles[0][0].leftPadding, 0)
+        self.assertEqual(agenda._cellStyles[0][0].topPadding, 0)
+        self.assertLess(self.cell_paragraph(agenda).style.fontSize, self.cell_paragraph(ordinary).style.fontSize)
+
+    def test_ordinary_tables_keep_their_size_and_padding(self):
+        table = self.tables(self.HABITS)[0]
+        self.assertEqual(self.cell_paragraph(table).style.fontSize, main.make_styles()["table_cell"].fontSize)
+        self.assertGreater(table._cellStyles[0][0].topPadding, 0)
+
+
+class HtmlInlineSmall(unittest.TestCase):
+    """Raw inline `<small>` prints its text smaller, on the baseline."""
+
+    def assert_small(self, markup, body):
+        self.assertRegex(markup, r'<font size="-\d+(\.\d+)?">' + re.escape(body) + r"</font>")
+        self.assertNotIn("&lt;small", markup)
+        self.assertNotIn("&lt;/small", markup)
+
+    def test_reference_after_a_title(self):
+        markup = main.inline_markup("Remove the lint allowlist <small>[ABC-123]</small>")
+        self.assertTrue(markup.startswith("Remove the lint allowlist <font "))
+        self.assert_small(markup, "[ABC-123]")
+
+    def test_small_text_is_not_raised(self):
+        markup = main.inline_markup("a <small>b</small>")
+        self.assertNotIn("<super", markup)
+        self.assertNotIn("rise=", markup)
+
+    def test_square_brackets_are_not_a_link(self):
+        markup = main.inline_markup("Title <small>[ABC-123]</small> and more")
+        self.assertNotIn("<a ", markup)
+        self.assert_small(markup, "[ABC-123]")
+
+    def test_content_is_inline_markdown(self):
+        self.assert_small(main.inline_markup("x <small>*note*</small>"), "<i>note</i>")
+
+    def test_superscript_nests_inside_small(self):
+        markup = main.inline_markup("x <small>a<sup>1</sup></small>")
+        self.assertRegex(markup, r'<font size="-[\d.]+">a<super [^>]*>1</super></font>')
+
+    def test_tag_inside_a_code_span_stays_literal(self):
+        markup = main.inline_markup("`a<small>b</small>`")
+        self.assertIn("&lt;small&gt;b&lt;/small&gt;", markup)
+
+    def test_unmatched_tags_stay_literal(self):
+        self.assertIn("&lt;small&gt;b", main.inline_markup("a <small>b"))
+        self.assertIn("&lt;/small&gt;", main.inline_markup("a</small> b"))
+
+    def test_emphasis_never_crosses_a_small_boundary(self):
+        markup = main.inline_markup("*a <small>b*</small>")
+        Paragraph(markup, main.make_styles()["body"])
+
+    def test_prints_smaller_than_the_surrounding_text(self):
+        style = main.make_styles()["bullet"]
+        paragraph = Paragraph(main.inline_markup("Title <small>[ABC-123]</small>"), style)
+        sizes = [frag.fontSize for frag in paragraph.frags if getattr(frag, "text", "").strip()]
+        self.assertEqual(sizes[0], style.fontSize)
+        self.assertLess(sizes[-1], style.fontSize)
+
+    def test_block_region_tags_still_bound_a_region(self):
+        story = main.parse_markdown("<small>\n\n- Title <small>[ABC-1]</small>\n\n</small>\n")
+        texts = [p.text for flowable in story for p in _paragraphs(flowable)]
+        self.assertTrue(any(re.search(r'<font size="-[\d.]+">\[ABC-1\]</font>', t) for t in texts))
+        self.assertFalse(any("&lt;small" in t for t in texts))
+
+    def test_table_fitting_measures_the_text_not_its_tags(self):
+        self.assertEqual(main._visible_cell_text("Title <small>[ABC-1]</small>"), "Title [ABC-1]")
+
+
 class HtmlSuperscript(unittest.TestCase):
     """Raw `<sup>` renders as a superscript instead of printing its tags."""
 

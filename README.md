@@ -180,10 +180,13 @@ hyphens or slashes, and header words stay intact. Headers repeat on subsequent
 pages; ordinary rows stay together, while a row taller than a page can continue
 onto the next page.
 
-Four pieces of raw HTML are understood. An inline `<sup>G4</sup>` renders as a
+Five pieces of raw HTML are understood. An inline `<sup>G4</sup>` renders as a
 small raised superscript wherever text renders, including table cells and
 headings, which suits glossary markers placed right after a term; inside a code
-span or fence it stays literal. A `<small>` line and a `</small>` line, each on
+span or fence it stays literal. An inline `<small>[ABC-123]</small>` within a
+line prints its text 2 points smaller on the baseline, which suits a reference
+that should read quieter than its sentence; it follows the same rules as
+`<sup>`, and a `<sup>` can sit inside it. A `<small>` line and a `</small>` line, each on
 its own and with or without blank lines around the content, set everything
 between them in smaller type, which suits a glossary or steps a reader follows
 rather than studies: prose, list numbers, and tables all drop 1.5 points (a
