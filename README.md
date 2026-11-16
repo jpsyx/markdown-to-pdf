@@ -6,6 +6,24 @@ This is a small Python tool (built on [ReportLab](https://pypi.org/project/repor
 
 See [publishing and repository transfer](docs/publishing.md) for maintainer setup.
 
+## Page density: relaxed or compact
+
+Two layouts share the same typefaces, colors, and heading hierarchy:
+
+| Option | Layout |
+| --- | --- |
+| `--relaxed` | The default and the original look: 10.5-point body text on 16.5-point leading, generous space between blocks, and 6-point table cell padding. |
+| `--compact` | For long documents. Body text drops 1 point, to 9.5 on 14.25-point leading, and headings shrink in the same proportion. The space between blocks is 70% of relaxed, table cells pad 3.5 points vertically and 6 horizontally, and the top and bottom margins tighten to 44 and 38 points. Side margins stay, so lines do not get longer. |
+
+```sh
+markdown-to-pdf report.md --compact
+```
+
+The two options are mutually exclusive. `--compact` combines with
+`--compact-tables`, `--font-shrink`, `--agenda`, and explicit `--margin-*`
+values, which still win. On a set of table-heavy research reports, compact
+printed about 20-35% fewer pages.
+
 ## Reusable page decorations
 
 Add local artwork, a repeated footer, and a first-page rights notice without
@@ -42,7 +60,7 @@ lower-left text box, not its baseline.
 | `--copyright-callout TEXT` | Readable shaded box once, before the first document block. Must fit on the first page. |
 | `--font-regular PATH` | Local TTF for body, headings, callout, and footer; code font is unchanged. |
 | `--font-bold`, `--font-italic`, `--font-bold-italic` | Optional local TTF styles; require `--font-regular`. Omitted styles use regular, except bold-italic uses bold when supplied. |
-| `--margin-left`, `--margin-right`, `--margin-top`, `--margin-bottom` | Margin points; defaults 56.2, 56.2, 51.8, and 42. Header/footer automatically reserve additional space when needed. |
+| `--margin-left`, `--margin-right`, `--margin-top`, `--margin-bottom` | Margin points; defaults 56.2, 56.2, 51.8, and 42 (44 top and 38 bottom with `--compact`). Header/footer automatically reserve additional space when needed. |
 | `--deterministic` | Stable PDF bytes for unchanged Markdown, assets, fonts, options, and output filename in the same rendering environment. |
 
 Opacity defaults to 1 and accepts values from 0 to 1. Widths must be positive;

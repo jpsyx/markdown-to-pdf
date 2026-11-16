@@ -55,6 +55,17 @@ absolute checkout path and can be run directly by anyone.
   ships at `/System/Library/Fonts/SFNSMono.ttf` is Light, which prints anaemic.
 - **Styles** (`make_styles`): builds the `ParagraphStyle` set (headings, body,
   code, callouts, tables) and the page geometry constants (margins, brand colors).
+- **Density** (`Density`, `RELAXED`, `COMPACT`, `density_margins`, `_space`):
+  a frozen profile of body, table and code type and leading, a scale for the
+  space around blocks, table cell padding, and top and bottom margins.
+  `make_styles` derives every size from it: headings and their leading scale
+  by the ratio of the profile's body size to relaxed's, so compact keeps the
+  same hierarchy one point smaller. Block builders read the conversion's
+  profile through `_DENSITY`, which `_conversion_layout` scopes and restores
+  like the margins, and scale their spacing with `_space`. `RELAXED` holds the
+  original values, so the default output is unchanged. Compact keeps the side
+  margins and a 1.5 body leading ratio, because smaller type already lengthens
+  the line.
   Inline code sits 2 pt below its surrounding text (8.5 pt in the default
   10.5 pt body and tables), so the monospace face does not overpower the serif.
   Fenced code uses 8.5 pt type with 11.5 pt leading; `--font-shrink` retains
@@ -149,6 +160,11 @@ absolute checkout path and can be run directly by anyone.
   then density deficits and total row height. Cached measurements and bounded
   searches keep the work finite. Header words remain intact; body cells can
   break at existing hyphens and slashes, without arbitrary character splitting.
+  A bare URL may also break after a hyphen, dot, underscore, question mark or
+  equals sign, because one long slug would otherwise run off the page or starve
+  its neighbours. A slash gets a zero-size break only when text follows it: a
+  zero-size space beside a real one merges with it, so "A / B" rendered as
+  "A /B".
   Inline code shares the 8-point floor. Each table owns copied styles, leaving
   other tables and body text unchanged. Tables span `CONTENT_WIDTH`, accounting
   for the frame padding. `_ReadableTable` repeats headers and splits within a

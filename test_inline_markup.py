@@ -2817,5 +2817,209 @@ class HtmlTables(unittest.TestCase):
         self.assertIsInstance(box._cellvalues[0][0], Paragraph)
 
 
+def _page_count(markdown: str, **options) -> int:
+    with tempfile.TemporaryDirectory() as directory:
+        source = Path(directory) / "doc.md"
+        source.write_text(markdown)
+        output = Path(directory) / "doc.pdf"
+        with contextlib.redirect_stdout(io.StringIO()):
+            main.convert_markdown_to_pdf(source, output, **options)
+        return len(re.findall(rb"/Type\s*/Page\b", output.read_bytes()))
+
+
+def _cell_paddings(table: Table) -> dict[str, float]:
+    """The padding ReportLab resolved for a body cell of `table`."""
+    cell = table._cellStyles[1][0]
+    return {
+        "TOPPADDING": cell.topPadding,
+        "BOTTOMPADDING": cell.bottomPadding,
+        "LEFTPADDING": cell.leftPadding,
+        "RIGHTPADDING": cell.rightPadding,
+    }
+
+
+class Density(unittest.TestCase):
+    """`--relaxed` keeps the original look; `--compact` uses fewer pages.
+
+    Compact drops body type 1 pt, scales headings by the same ratio, and
+    tightens leading, spacing and padding, while keeping enough air to read.
+    """
+
+    BODY_STYLES = ("body", "bullet", "table_cell", "table_header", "quote_plain", "callout", "scheduled", "code")
+    HEADINGS = ("title", "h2", "h3", "h4", "h5", "h6")
+
+    def setUp(self):
+        self.relaxed = main.make_styles(density=main.RELAXED)
+        self.compact = main.make_styles(density=main.COMPACT)
+
+    def test_relaxed_is_the_default_and_keeps_the_original_look(self):
+        default = main.make_styles()
+        for key, style in default.items():
+            with self.subTest(style=key):
+                other = self.relaxed[key]
+                self.assertEqual(
+                    (style.fontSize, style.leading, style.spaceBefore, style.spaceAfter),
+                    (other.fontSize, other.leading, other.spaceBefore, other.spaceAfter),
+                )
+        self.assertEqual((self.relaxed["body"].fontSize, self.relaxed["body"].leading), (10.5, 16.5))
+        self.assertEqual((self.relaxed["title"].fontSize, self.relaxed["h2"].fontSize), (21, 15))
+
+    def test_compact_body_type_is_one_point_smaller(self):
+        for key in self.BODY_STYLES:
+            with self.subTest(style=key):
+                self.assertAlmostEqual(self.compact[key].fontSize, self.relaxed[key].fontSize - 1)
+
+    def test_compact_headings_shrink_in_proportion_to_the_body(self):
+        ratio = self.compact["body"].fontSize / self.relaxed["body"].fontSize
+        for key in self.HEADINGS:
+            with self.subTest(style=key):
+                self.assertAlmostEqual(self.compact[key].fontSize, self.relaxed[key].fontSize * ratio, places=1)
+                self.assertAlmostEqual(self.compact[key].leading, self.relaxed[key].leading * ratio, places=1)
+        sizes = [self.compact[key].fontSize for key in ("title", "h2", "h3", "h4")]
+        self.assertEqual(sizes, sorted(sizes, reverse=True))
+        self.assertGreater(sizes[-1], self.compact["body"].fontSize)
+
+    def test_compact_is_tighter_but_still_breathes(self):
+        body, cell = self.compact["body"], self.compact["table_cell"]
+        self.assertLess(body.leading, self.relaxed["body"].leading)
+        self.assertGreaterEqual(body.leading / body.fontSize, 1.5)
+        self.assertGreaterEqual(cell.leading / cell.fontSize, 1.3)
+        for key in ("body", "h2", "h3"):
+            with self.subTest(style=key):
+                for attribute in ("spaceBefore", "spaceAfter"):
+                    relaxed = getattr(self.relaxed[key], attribute)
+                    compact = getattr(self.compact[key], attribute)
+                    self.assertLessEqual(compact, relaxed)
+                    self.assertGreaterEqual(compact, relaxed * 0.6)
+
+    def test_compact_tables_use_less_but_real_padding(self):
+        header, rows = ["Term", "Meaning"], [["LTV", "What a customer is worth over a set horizon."]]
+        paddings = {}
+        for name, density in (("relaxed", main.RELAXED), ("compact", main.COMPACT)):
+            with main._conversion_layout(margins=main.density_margins(density), fonts=None, density=density):
+                table = main.render_table(header, rows, ["LEFT", "LEFT"], main.make_styles())
+                paddings[name] = _cell_paddings(table)
+                paddings[name]["space"] = table.spaceAfter
+        for key in ("TOPPADDING", "LEFTPADDING", "space"):
+            with self.subTest(padding=key):
+                self.assertLess(paddings["compact"][key], paddings["relaxed"][key])
+                self.assertGreaterEqual(paddings["compact"][key], 3)
+        self.assertEqual(paddings["relaxed"]["TOPPADDING"], 6)
+
+    def test_compact_keeps_the_line_length_and_trims_vertical_margins(self):
+        relaxed, compact = main.density_margins(main.RELAXED), main.density_margins(main.COMPACT)
+        self.assertEqual(relaxed, [main.LEFT_MARGIN, main.RIGHT_MARGIN, main.TOP_MARGIN, main.BOTTOM_MARGIN])
+        self.assertEqual(compact[:2], relaxed[:2])
+        self.assertLess(compact[2], relaxed[2])
+        self.assertLessEqual(compact[3], relaxed[3])
+        # The page number prints in the bottom margin, under the frame.
+        self.assertGreater(compact[3], main.FOOTER_BASELINE + main.FOOTER_FONT_SIZE)
+
+    def test_the_layout_scope_restores_the_density(self):
+        with main._conversion_layout(margins=main.density_margins(main.COMPACT), fonts=None, density=main.COMPACT):
+            self.assertIs(main._DENSITY, main.COMPACT)
+        self.assertIs(main._DENSITY, main.RELAXED)
+
+    def test_compact_documents_use_fewer_pages(self):
+        section = (
+            "## Section\n\nA paragraph of ordinary prose that wraps across the line a few times, "
+            "long enough to show how leading and spacing add up over a page of reading.\n\n"
+            "- First point that runs a little long\n- Second point\n- Third point\n\n"
+            "| Column | Meaning |\n| --- | --- |\n"
+            "| One | A table cell with a sentence of text in it. |\n"
+            "| Two | Another table cell with a sentence of text. |\n\n"
+        )
+        markdown = "# Title\n\n" + section * 30
+        relaxed = _page_count(markdown, density="relaxed")
+        compact = _page_count(markdown, density="compact")
+        # Prose-heavy reports measured 25-35% fewer pages; this sample is half
+        # small tables, which save less, so the guard asks for at least 15%.
+        self.assertLessEqual(compact, relaxed * 0.85)
+        self.assertEqual(_page_count(markdown), relaxed)
+
+    def test_an_unknown_density_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "doc.md"
+            source.write_text("Text.\n")
+            with self.assertRaisesRegex(ValueError, "density"):
+                main.convert_markdown_to_pdf(source, Path(directory) / "doc.pdf", density="tiny")
+
+
+class DensityFlags(unittest.TestCase):
+    def _density(self, *arguments):
+        with (
+            unittest.mock.patch.object(sys, "argv", ["markdown-to-pdf", "input.md", *arguments]),
+            unittest.mock.patch.object(main, "convert_markdown_to_pdf") as convert,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            main.main()
+        return convert.call_args.kwargs["density"]
+
+    def test_relaxed_is_the_default(self):
+        self.assertEqual(self._density(), "relaxed")
+        self.assertEqual(self._density("--relaxed"), "relaxed")
+
+    def test_compact_flag_selects_compact(self):
+        self.assertEqual(self._density("--compact"), "compact")
+
+    def test_relaxed_and_compact_are_mutually_exclusive(self):
+        with (
+            unittest.mock.patch.object(sys, "argv", ["markdown-to-pdf", "input.md", "--relaxed", "--compact"]),
+            unittest.mock.patch.object(main, "convert_markdown_to_pdf") as convert,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit) as error,
+        ):
+            main.main()
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("not allowed with argument", stderr.getvalue())
+        convert.assert_not_called()
+
+    def test_help_documents_both_densities(self):
+        out = subprocess.run([sys.executable, main.__file__, "--help"], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0)
+        self.assertIn("--relaxed", out.stdout)
+        self.assertIn("--compact", out.stdout)
+        self.assertIn("--compact", out.stdout.split("Examples", 1)[-1])
+
+
+class TableUrls(unittest.TestCase):
+    """A long URL in a table wraps inside its column instead of running off the page."""
+
+    URL = "https://sensortower.com/blog/2025-q4-unified-top-5-music-and-audio-revenue-europe-6013bc4c241bc16eb8396743"
+
+    def test_urls_can_break_after_hyphens_and_dots(self):
+        markup = main._table_markup(self.URL, 10)
+        self.assertIn('2025-<font size="0"> </font>q4', markup)
+        self.assertIn('sensortower.<font size="0"> </font>com', markup)
+
+    def test_hyphenated_prose_is_left_alone(self):
+        self.assertNotIn('<font size="0">', main._table_markup("a well-known e.g. term", 10))
+
+    def test_a_spaced_slash_keeps_its_spaces(self):
+        # "BIPA / CUBI" rendered as "BIPA /CUBI": the zero-size break after
+        # the slash merged with the real space that followed it.
+        self.assertNotIn('<font size="0">', main._table_markup("BIPA / CUBI", 10))
+        cell = Paragraph(main._table_markup("BIPA / CUBI", 10), main.make_styles()["table_cell"])
+        cell.wrap(500, 100)
+        self.assertEqual(" ".join(cell.getPlainText().split()), "BIPA / CUBI")
+
+    def test_an_unspaced_slash_still_offers_a_break(self):
+        self.assertIn('ads/<font size="0"> </font>search', main._table_markup("ads/search", 10))
+
+    def test_a_long_url_column_does_not_overflow(self):
+        header = ["Metric", "Value", "Definition", "Date", "Source type", "URL"]
+        rows = [["Europe active users", "~1.3M", "App active users, Europe, end of quarter",
+                 "Q4 2025", "Third-party est. (Sensor Tower)", self.URL]]
+        table = main.render_table(header, rows, ["LEFT"] * 6, main.make_styles())
+        padding = _cell_paddings(table)
+        for row in table._cellvalues:
+            for cell, width in zip(row, table._colWidths):
+                fresh = Paragraph(cell.text, cell.style)
+                fresh.wrap(width - padding["LEFTPADDING"] - padding["RIGHTPADDING"], main.PAGE_HEIGHT)
+                for line in fresh.blPara.lines:
+                    extra = line[0] if fresh.blPara.kind == 0 else line.extraSpace
+                    self.assertGreaterEqual(extra, -0.01, cell.text[:40])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

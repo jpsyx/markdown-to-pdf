@@ -33,7 +33,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.19.0"
+__version__ = "0.20.0"
 
 import argparse
 import hashlib
@@ -49,6 +49,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from functools import lru_cache, partial
 from typing import Callable, Iterable, Iterator, Sequence
@@ -669,6 +670,53 @@ FOOTER_BASELINE = 24.0
 FOOTER_COLOR = colors.HexColor("#6B7280")
 
 
+@dataclass(frozen=True)
+class Density:
+    """How much room the layout gives text: type, leading, spacing, margins.
+
+    `RELAXED` is the original look and stays the default. `COMPACT` sets body
+    type 1 pt smaller, scales headings and their leading by the same ratio, and
+    tightens body and table leading, the space between blocks, table padding
+    and the top and bottom margins, so a long document takes fewer pages. Side
+    margins stay: smaller type already lengthens the line, and body leading
+    keeps the 1.5 ratio a long measure needs.
+    """
+
+    name: str
+    body_size: float
+    body_leading: float
+    table_leading: float
+    code_size: float
+    code_leading: float
+    space_scale: float  # multiplies the vertical space around blocks
+    table_padding: tuple[float, float]  # (vertical, horizontal) per cell
+    top_margin: float
+    bottom_margin: float
+
+    @property
+    def type_scale(self) -> float:
+        """Headings and their leading scale with the body size."""
+        return self.body_size / RELAXED.body_size
+
+
+RELAXED = Density("relaxed", 10.5, 16.5, 16.5, 8.5, 11.5, 1.0, (6.0, 8.0), TOP_MARGIN, BOTTOM_MARGIN)
+COMPACT = Density("compact", 9.5, 14.25, 13.0, 7.5, 10.0, 0.7, (3.5, 6.0), 44.0, 38.0)
+DENSITIES = {density.name: density for density in (RELAXED, COMPACT)}
+
+# The density of the conversion in progress; `_conversion_layout` scopes it.
+_DENSITY = RELAXED
+
+
+def density_margins(density: Density) -> list[float]:
+    """Default [left, right, top, bottom] margins for `density`."""
+    return [LEFT_MARGIN, RIGHT_MARGIN, density.top_margin, density.bottom_margin]
+
+
+def _space(points: float) -> float:
+    """Vertical space around a block, scaled for the current density."""
+    return points * _DENSITY.space_scale
+
+
 def versioned_path(path: Path) -> Path:
     if not path.exists():
         return path
@@ -970,206 +1018,81 @@ def inline_markup(text: str, base_dir: str | None = None) -> str:
 MIN_CODE_FONT_SIZE = 7.0
 
 
-def make_styles(font_shrink: float = 0.0, *, black_text: bool = False) -> dict[str, ParagraphStyle]:
-    """Build the paragraph style sheet.
+def make_styles(
+    font_shrink: float = 0.0, *, black_text: bool = False, density: Density | None = None,
+) -> dict[str, ParagraphStyle]:
+    """Build the paragraph style sheet for `density` (the current one by default).
 
-    `font_shrink` (points) is subtracted from every style's fontSize and
-    leading. Used by the agenda flow as a last-resort fit to keep the
-    printed PDF inside 2 pages without touching the default look for
-    every other markdown-to-pdf invocation.
+    Heading sizes and leading scale with the body size, so a denser layout
+    keeps the same hierarchy. `font_shrink` (points) is then subtracted from
+    every style's fontSize and leading. Used by the agenda flow as a last-resort
+    fit to keep the printed PDF inside 2 pages without touching the default
+    look for every other markdown-to-pdf invocation.
     """
+    d = density or _DENSITY
     s = float(font_shrink)
+    k = d.type_scale
     chapter_color = BLACK if black_text else CHAPTER_BLUE
     section_color = BLACK if black_text else SECTION_BLUE
     body_color = BLACK if black_text else BODY_COLOR
     base = getSampleStyleSheet()
+
+    def heading(name, parent, size, leading, before, after, color):
+        return ParagraphStyle(
+            name,
+            parent=base[parent],
+            fontName=HEADING_FONT_BOLD,
+            fontSize=size * k - s,
+            leading=leading * k - s,
+            textColor=color,
+            alignment=TA_LEFT,
+            leftIndent=0,
+            firstLineIndent=0,
+            spaceBefore=before * d.space_scale,
+            spaceAfter=after * d.space_scale,
+            keepWithNext=True,
+        )
+
+    def text(name, font, color, *, leading=None, after=0.0, indent=0):
+        return ParagraphStyle(
+            name,
+            parent=base["BodyText"],
+            fontName=font,
+            fontSize=d.body_size - s,
+            leading=(d.body_leading if leading is None else leading) - s,
+            textColor=color,
+            alignment=TA_LEFT,
+            leftIndent=indent,
+            firstLineIndent=0,
+            spaceBefore=0,
+            spaceAfter=after * d.space_scale,
+        )
+
     return {
-        "title": ParagraphStyle(
-            "MDChapterTitle",
-            parent=base["Heading1"],
-            fontName=HEADING_FONT_BOLD,
-            fontSize=21 - s,
-            leading=25 - s,
-            textColor=chapter_color,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=0,
-            spaceAfter=20,
-            keepWithNext=True,
-        ),
-        "h2": ParagraphStyle(
-            "MDSectionHeading",
-            parent=base["Heading2"],
-            fontName=HEADING_FONT_BOLD,
-            fontSize=15 - s,
-            leading=18 - s,
-            textColor=section_color,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=15,
-            spaceAfter=7,
-            keepWithNext=True,
-        ),
-        "h3": ParagraphStyle(
-            "MDSubsectionHeading",
-            parent=base["Heading3"],
-            fontName=HEADING_FONT_BOLD,
-            fontSize=12.5 - s,
-            leading=15.5 - s,
-            textColor=section_color,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=14,
-            spaceAfter=8,
-            keepWithNext=True,
-        ),
-        "h4": ParagraphStyle(
-            "MDMinorHeading",
-            parent=base["Heading4"],
-            fontName=HEADING_FONT_BOLD,
-            fontSize=11.5 - s,
-            leading=14.5 - s,
-            textColor=chapter_color,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=12,
-            spaceAfter=6,
-            keepWithNext=True,
-        ),
-        "h5": ParagraphStyle(
-            "MDDeepHeading",
-            parent=base["Heading5"],
-            fontName=HEADING_FONT_BOLD,
-            fontSize=10.5 - s,
-            leading=13.5 - s,
-            textColor=chapter_color,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=10,
-            spaceAfter=5,
-            keepWithNext=True,
-        ),
-        "h6": ParagraphStyle(
-            "MDDeepestHeading",
-            parent=base["Heading6"],
-            fontName=HEADING_FONT_BOLD,
-            fontSize=10 - s,
-            leading=13 - s,
-            textColor=BODY_COLOR,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=9,
-            spaceAfter=4,
-            keepWithNext=True,
-        ),
-        "body": ParagraphStyle(
-            "MDBody",
-            parent=base["BodyText"],
-            fontName=BODY_FONT,
-            fontSize=10.5 - s,
-            leading=16.5 - s,
-            textColor=body_color,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=0,
-            spaceAfter=12,
-        ),
-        "table_cell": ParagraphStyle(
-            "MDTableCell",
-            parent=base["BodyText"],
-            fontName=BODY_FONT,
-            fontSize=10.5 - s,
-            leading=16.5 - s,
-            textColor=body_color,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=0,
-            spaceAfter=0,
-        ),
-        "table_header": ParagraphStyle(
-            "MDTableHeader",
-            parent=base["BodyText"],
-            fontName=BODY_FONT_BOLD,
-            fontSize=10.5 - s,
-            leading=16.5 - s,
-            textColor=body_color,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=0,
-            spaceAfter=0,
-        ),
-        "quote_plain": ParagraphStyle(
-            "MDQuotePlain",
-            parent=base["BodyText"],
-            fontName=BODY_FONT_ITALIC,
-            fontSize=10.5 - s,
-            leading=16.5 - s,
-            textColor=chapter_color,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=0,
-            spaceAfter=0,
-        ),
-        "callout": ParagraphStyle(
-            "MDCallout",
-            parent=base["BodyText"],
-            fontName=BODY_FONT_ITALIC,
-            fontSize=10.5 - s,
-            leading=16.5 - s,
-            textColor=chapter_color,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=0,
-            spaceAfter=0,
-        ),
-        "bullet": ParagraphStyle(
-            "MDBullet",
-            parent=base["BodyText"],
-            fontName=BODY_FONT,
-            fontSize=10.5 - s,
-            leading=16.5 - s,
-            textColor=body_color,
-            alignment=TA_LEFT,
-            leftIndent=0,
-            firstLineIndent=0,
-            spaceBefore=0,
-            spaceAfter=4,
-        ),
+        "title": heading("MDChapterTitle", "Heading1", 21, 25, 0, 20, chapter_color),
+        "h2": heading("MDSectionHeading", "Heading2", 15, 18, 15, 7, section_color),
+        "h3": heading("MDSubsectionHeading", "Heading3", 12.5, 15.5, 14, 8, section_color),
+        "h4": heading("MDMinorHeading", "Heading4", 11.5, 14.5, 12, 6, chapter_color),
+        "h5": heading("MDDeepHeading", "Heading5", 10.5, 13.5, 10, 5, chapter_color),
+        "h6": heading("MDDeepestHeading", "Heading6", 10, 13, 9, 4, BODY_COLOR),
+        "body": text("MDBody", BODY_FONT, body_color, after=12),
+        "table_cell": text("MDTableCell", BODY_FONT, body_color, leading=d.table_leading),
+        "table_header": text("MDTableHeader", BODY_FONT_BOLD, body_color, leading=d.table_leading),
+        "quote_plain": text("MDQuotePlain", BODY_FONT_ITALIC, chapter_color),
+        "callout": text("MDCallout", BODY_FONT_ITALIC, chapter_color),
+        "bullet": text("MDBullet", BODY_FONT, body_color, after=4),
         # Used for "scheduled anchor" lines in an ordered checkbox list — items
         # the user can't tick off (e.g. "12:00 PM | Walk Luna"). Lives between
         # numbered list items, indented so the time column aligns with the time
         # column of the numbered rows above and below, with tight spacing so
         # the visual reads as "still in the list".
-        "scheduled": ParagraphStyle(
-            "MDScheduled",
-            parent=base["BodyText"],
-            fontName=BODY_FONT,
-            fontSize=10.5 - s,
-            leading=16.5 - s,
-            textColor=body_color,
-            alignment=TA_LEFT,
-            leftIndent=40,
-            firstLineIndent=0,
-            spaceBefore=0,
-            spaceAfter=4,
-        ),
+        "scheduled": text("MDScheduled", BODY_FONT, body_color, after=4, indent=40),
         "code": ParagraphStyle(
             "MDCode",
             parent=base["Code"],
             fontName=CODE_FONT,
-            fontSize=max(MIN_CODE_FONT_SIZE, 8.5 - s),
-            leading=max(9.5, 11.5 - s),
+            fontSize=max(MIN_CODE_FONT_SIZE, d.code_size - s),
+            leading=max(9.5, d.code_leading - s),
             textColor=BODY_COLOR,
             alignment=TA_LEFT,
             leftIndent=0,
@@ -1306,14 +1229,14 @@ def _callout_frame(content: Flowable | list[Flowable]) -> Table:
                 ("BOX", (0, 0), (-1, -1), 1.0, CALLOUT_BORDER),
                 ("LEFTPADDING", (0, 0), (-1, -1), CALLOUT_PADDING),
                 ("RIGHTPADDING", (0, 0), (-1, -1), CALLOUT_PADDING),
-                ("TOPPADDING", (0, 0), (-1, -1), 9),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+                ("TOPPADDING", (0, 0), (-1, -1), _space(9)),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), _space(9)),
             ]
         )
     )
     table.hAlign = "LEFT"
     table.spaceBefore = 0
-    table.spaceAfter = 12
+    table.spaceAfter = _space(12)
     return table
 
 
@@ -1417,7 +1340,7 @@ def figure_caption_box(
     )
     box.hAlign = "LEFT"
     box.spaceBefore = 0
-    box.spaceAfter = 14
+    box.spaceAfter = _space(14)
     box._figure_caption_source = (list(lines), styles, parse_options)
     return box
 
@@ -1833,8 +1756,8 @@ def code_block(
             )
         )
     table.hAlign = "LEFT"
-    table.spaceBefore = 6
-    table.spaceAfter = 12
+    table.spaceBefore = _space(6)
+    table.spaceAfter = _space(12)
     return table
 
 
@@ -1960,8 +1883,8 @@ def mermaid_block(
     # takes any object with `.read`, and seeks it itself.
     diagram = Image(reader.fileName, width=width * fit, height=height * fit)
     diagram.hAlign = "LEFT"
-    diagram.spaceBefore = 6
-    diagram.spaceAfter = 12
+    diagram.spaceBefore = _space(6)
+    diagram.spaceAfter = _space(12)
     # `group_diagram_figures` re-fits this once it knows how much room the
     # caption and glossary need, which is not knowable here.
     diagram._mermaid_natural_size = (width, height)
@@ -2213,8 +2136,8 @@ def local_image_block(target: str, base_dir: str | None = None) -> Image:
         height=native_height * fit,
     )
     image.hAlign = "LEFT"
-    image.spaceBefore = 6
-    image.spaceAfter = 12
+    image.spaceBefore = _space(6)
+    image.spaceAfter = _space(12)
     return image
 
 
@@ -2233,8 +2156,8 @@ def blockquote(text: str, style: ParagraphStyle) -> Table:
         )
     )
     table.hAlign = "LEFT"
-    table.spaceBefore = 4
-    table.spaceAfter = 12
+    table.spaceBefore = _space(4)
+    table.spaceAfter = _space(12)
     return table
 
 
@@ -2448,8 +2371,31 @@ def _visible_cell_text(cell: str) -> str:
     return html.unescape(_TAG_RE.sub("", inline_markup(cell)))
 
 
+# A bare URL in a table cell. Inside one, a break may also follow a hyphen,
+# dot, underscore, question mark or equals sign, because a long slug between
+# two slashes would otherwise run off the page or starve its neighbours.
+_TABLE_URL_RE = re.compile(r"(?:https?://|www\.)[^\s<]+")
+_TABLE_URL_BREAK_RE = re.compile(r"([-._?=/])(?=\S)")
+# Only where text follows: a zero-size space beside a real one merges with it,
+# which turned "BIPA / CUBI" into "BIPA /CUBI".
+_TABLE_SLASH_BREAK_RE = re.compile(r"/(?=\S)")
+_ZERO_SIZE_BREAK = '<font size="0"> </font>'
+
+
+def _table_text_breaks(text: str) -> str:
+    """Add break opportunities to one text node of a table cell."""
+    pieces = []
+    last = 0
+    for match in _TABLE_URL_RE.finditer(text):
+        pieces.append(_TABLE_SLASH_BREAK_RE.sub("/" + _ZERO_SIZE_BREAK, text[last:match.start()]))
+        pieces.append(_TABLE_URL_BREAK_RE.sub(r"\1" + _ZERO_SIZE_BREAK, match.group(0)))
+        last = match.end()
+    pieces.append(_TABLE_SLASH_BREAK_RE.sub("/" + _ZERO_SIZE_BREAK, text[last:]))
+    return "".join(pieces)
+
+
 def _table_markup(cell: str, font_size: float) -> str:
-    """Allow breaks at slashes without inserting a visible gap or a hyphen.
+    """Allow breaks at slashes, and inside URLs, without a visible gap or hyphen.
 
     ReportLab does not recognize zero-width spaces as word boundaries. A
     zero-size space provides that boundary, including inside styled links and
@@ -2460,7 +2406,7 @@ def _table_markup(cell: str, font_size: float) -> str:
     code_size = f'size="{max(MIN_TABLE_FONT_SIZE, font_size - 2):g}"'
     return "".join(
         part.replace('size="-2"', code_size) if part.startswith("<")
-        else part.replace("/", '/<font size="0"> </font>')
+        else _table_text_breaks(part)
         for part in re.split(r"(<[^>]+>)", markup)
     )
 
@@ -2677,11 +2623,12 @@ def render_table(
     alignments = alignments + ["LEFT"] * (n_cols - len(alignments))
 
     header_is_empty = all(not cell.strip() for cell in header)
-    top_pad, bot_pad = (0, 0) if agenda_tables else (1, 1) if compact else (6, 6)
+    vertical_pad, horizontal_pad = _DENSITY.table_padding
+    top_pad, bot_pad = (0, 0) if agenda_tables else (1, 1) if compact else (vertical_pad, vertical_pad)
     if agenda_tables:
         styles = _agenda_table_styles(styles)
-    left_pad = 0 if agenda_tables else 8
-    right_pad = 8
+    left_pad = 0 if agenda_tables else horizontal_pad
+    right_pad = horizontal_pad
     data, col_widths = _fit_table(header, rows, styles, left_pad + right_pad)
     table_style: list = [
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -2701,8 +2648,8 @@ def render_table(
     table = _ReadableTable(data, colWidths=col_widths, repeatRows=0 if header_is_empty else 1)
     table.setStyle(TableStyle(table_style))
     table.hAlign = "LEFT"
-    table.spaceBefore = 2 if compact else 6
-    table.spaceAfter = 4 if compact else 12
+    table.spaceBefore = 2 if compact else _space(6)
+    table.spaceAfter = 4 if compact else _space(12)
     return table
 
 
@@ -2891,7 +2838,7 @@ def flush_bullets(
                 bulletFontSize=styles["bullet"].fontSize,
                 bulletColor=BODY_COLOR,
                 spaceBefore=0,
-                spaceAfter=4,
+                spaceAfter=_space(4),
             )
         )
         buffer.clear()
@@ -2940,7 +2887,7 @@ def flush_bullets(
         "bulletFontSize": styles["bullet"].fontSize,
         "bulletColor": BODY_COLOR,
         "spaceBefore": 0,
-        "spaceAfter": 12,
+        "spaceAfter": _space(12),
     }
     if ordered:
         # `start` controls the first number for ordered lists. When passed to an
@@ -3335,7 +3282,7 @@ def parse_markdown(
 
         if stripped == "---":
             flush_paragraph(paragraph_buffer, story, styles)
-            story.append(Spacer(1, 8))
+            story.append(Spacer(1, _space(8)))
         elif image_match:
             flush_paragraph(paragraph_buffer, story, styles)
             story.append(local_image_block(image_match.group(2), _LINK_BASE_DIR))
@@ -3563,11 +3510,13 @@ def _custom_font_family(regular, bold, italic, bold_italic):
 
 
 @contextlib.contextmanager
-def _conversion_layout(*, margins, fonts):
-    """Scope legacy parser geometry and typography to this conversion."""
-    names = ("LEFT_MARGIN", "RIGHT_MARGIN", "TOP_MARGIN", "BOTTOM_MARGIN", "CONTENT_WIDTH", "CONTENT_HEIGHT", "BODY_FONT", "BODY_FONT_BOLD", "BODY_FONT_ITALIC", "HEADING_FONT", "HEADING_FONT_BOLD", "_LINK_BASE_DIR", "_BLACK_TEXT")
+def _conversion_layout(*, margins, fonts, density: Density | None = None):
+    """Scope legacy parser geometry, typography and density to this conversion."""
+    names = ("LEFT_MARGIN", "RIGHT_MARGIN", "TOP_MARGIN", "BOTTOM_MARGIN", "CONTENT_WIDTH", "CONTENT_HEIGHT", "BODY_FONT", "BODY_FONT_BOLD", "BODY_FONT_ITALIC", "HEADING_FONT", "HEADING_FONT_BOLD", "_LINK_BASE_DIR", "_BLACK_TEXT", "_DENSITY")
     saved = {name: globals()[name] for name in names}
     try:
+        if density is not None:
+            globals()["_DENSITY"] = density
         for name, value in zip(names[:4], margins):
             globals()[name] = value
         globals()["CONTENT_WIDTH"] = PAGE_WIDTH - margins[0] - margins[1] - 2 * FRAME_PADDING
@@ -3676,18 +3625,22 @@ def convert_markdown_to_pdf(
     margin_top: float | None = None,
     margin_bottom: float | None = None,
     deterministic: bool = False,
+    density: str = "relaxed",
 ) -> Path:
+    if density not in DENSITIES:
+        raise ValueError(f"Unknown density {density!r}; choose one of: {', '.join(DENSITIES)}")
+    layout = DENSITIES[density]
     if markdown_path.suffix.lower() != ".md":
         raise ValueError(f"Input file must have a .md extension, got: {markdown_path.name}")
     if not markdown_path.exists():
         raise FileNotFoundError(f"Markdown file not found: {markdown_path}")
     margins = [_point(value, default, f"{side} margin") for value, default, side in zip(
         (margin_left, margin_right, margin_top, margin_bottom),
-        (LEFT_MARGIN, RIGHT_MARGIN, TOP_MARGIN, BOTTOM_MARGIN),
+        density_margins(layout),
         ("left", "right", "top", "bottom"))]
     fonts = _custom_font_family(font_regular, font_bold, font_italic, font_bold_italic)
     # All decoration validation precedes output resolution and overwrite prompts.
-    with _conversion_layout(margins=margins, fonts=fonts):
+    with _conversion_layout(margins=margins, fonts=fonts, density=layout):
         header_image = _decoration_image(header, header_x, header_y, header_width, header_opacity, "header")
         watermark_image = _decoration_image(watermark, watermark_x, watermark_y, watermark_width, watermark_opacity, "watermark")
         footer_spec = None
@@ -3719,7 +3672,7 @@ def convert_markdown_to_pdf(
             margins[2] = max(margins[2], PAGE_HEIGHT - header_image[2] + 10)
         if PAGE_WIDTH - margins[0] - margins[1] - 2 * FRAME_PADDING < 48 or PAGE_HEIGHT - margins[2] - margins[3] - 2 * FRAME_PADDING < 48:
             raise ValueError("Margins and decorations must leave at least 48 points of content width and height")
-        with _conversion_layout(margins=margins, fonts=fonts):
+        with _conversion_layout(margins=margins, fonts=fonts, density=layout):
             global _LINK_BASE_DIR
             _LINK_BASE_DIR = str(markdown_path.resolve().parent)
             markdown = normalize_text(markdown_path.read_text(encoding="utf-8"))
@@ -3758,6 +3711,7 @@ def main() -> None:
         prog="markdown-to-pdf",
         description="Convert a markdown file to a styled PDF.",
         epilog="Examples: markdown-to-pdf guide.md --out guide.pdf; "
+        "markdown-to-pdf report.md --compact; "
         "markdown-to-pdf guide.md --header logo.png --footer 'Confidential' "
         "--copyright-callout '**All rights reserved.**' --deterministic. "
         "Coordinates and margins use PDF points from the bottom-left. "
@@ -3784,6 +3738,24 @@ def main() -> None:
         default=None,
         help="Optional PDF file or output directory, e.g. chapter.pdf or exports/",
     )
+    density = parser.add_mutually_exclusive_group()
+    density.add_argument(
+        "--relaxed",
+        dest="density",
+        action="store_const",
+        const="relaxed",
+        help="Spacious layout (default): 10.5 pt body text, open line spacing, generous padding and margins.",
+    )
+    density.add_argument(
+        "--compact",
+        dest="density",
+        action="store_const",
+        const="compact",
+        help="Denser layout for long documents: 9.5 pt body text with headings scaled to match, "
+        "tighter line spacing, padding and top/bottom margins. Uses noticeably fewer pages and "
+        "keeps room to breathe. Combines with the table and font options below.",
+    )
+    parser.set_defaults(density="relaxed")
     parser.add_argument(
         "--no-table-borders",
         dest="table_borders",
@@ -3830,7 +3802,8 @@ def main() -> None:
     for face in ("regular", "bold", "italic", "bold-italic"):
         parser.add_argument(f"--font-{face}", type=Path,
             help=f"Local {face} TTF. Custom styles require --font-regular; missing styles use regular (bold-italic uses bold). Code font stays unchanged.")
-    for side, default in (("left", LEFT_MARGIN), ("right", RIGHT_MARGIN), ("top", TOP_MARGIN), ("bottom", BOTTOM_MARGIN)):
+    for side, relaxed, compact in zip(("left", "right", "top", "bottom"), density_margins(RELAXED), density_margins(COMPACT)):
+        default = f"{relaxed}" if relaxed == compact else f"{relaxed}, or {compact} with --compact"
         parser.add_argument(f"--margin-{side}", type=float, help=f"{side.capitalize()} margin in PDF points (default {default}); header/footer reserve extra space as needed.")
     parser.add_argument("--deterministic", action="store_true", help="Produce stable PDF bytes for unchanged input, options, assets, and output filename.")
     args = parser.parse_args()
@@ -3855,6 +3828,7 @@ def main() -> None:
             **{key: value for key, value in vars(args).items() if key.startswith(("header", "watermark", "footer", "margin_", "font_")) and key != "font_shrink"},
             copyright_callout=args.copyright_callout,
             deterministic=args.deterministic,
+            density=args.density,
         )
     except (ValueError, FileNotFoundError) as err:
         print(_color(f"error: {err}", _Color.RED, _Color.BOLD, stream=sys.stderr), file=sys.stderr)
