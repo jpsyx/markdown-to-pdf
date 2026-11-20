@@ -53,6 +53,7 @@ lower-left text box, not its baseline.
 | --- | --- |
 | `--header PATH` | Local raster image on every page. Default width 120, x at left margin, top edge 24 points below page top. |
 | `--watermark PATH` | Local raster image beneath each page's content. Default width 300, centered. |
+| `--no-title-footer` | Omit the default bottom-left document title; custom footer text and page numbers remain. |
 | `--footer TEXT` | Text on every page, 9-point type with 11-point leading. Default x at left margin, y 20, width equal to the margin box less 45 points. |
 | `--header-x`, `--header-y`, `--header-width`, `--header-opacity` | Override header placement, size, or opacity. |
 | `--watermark-x`, `--watermark-y`, `--watermark-width`, `--watermark-opacity` | Override watermark placement, size, or opacity. |
@@ -83,9 +84,14 @@ markdown-to-pdf guide.md --copyright-callout \
   '<p><strong>Reader notice</strong><br/>Shared for review only.</p>'
 ```
 
-The footer repeats on single-page documents too. Existing page numbering remains
-hidden for one page and appears on every page of longer documents. When a custom
-footer is present, page numbers move to the right at the footer's y coordinate.
+The document title repeats in the bottom-left corner on every page, including
+single-page documents. It uses the first nonempty H1 heading, with inline markup
+removed, or the input filename without its extension when there is no H1.
+Long titles are shortened with an ellipsis to leave room for page numbers.
+Use `--no-title-footer` to omit it. Custom `--footer` text is preserved below
+the title, with space reserved automatically. Page numbers remain hidden for
+one page and appear on the right for longer documents; with a custom footer,
+they use that footer's y coordinate. Without either footer, numbers are centered.
 `--black-text` still controls document text; an explicitly colored footer or
 callout span retains its chosen color. Custom fonts and margins apply only to
 the current conversion, including when several conversions share a Python
@@ -284,9 +290,9 @@ current working directory. Images retain their aspect ratio and shrink to fit
 the page without being enlarged. Remote image URLs are rejected and never
 fetched.
 
-Pages are numbered, centred in the bottom margin. The footer sits below the
-text block, so numbering never pushes content around, and a document that fits
-on one page is left unnumbered.
+Every page includes the document title at the bottom left by default. Use
+`--no-title-footer` to opt out. Longer documents also have page numbers at the
+bottom right; a document that fits on one page is left unnumbered.
 
 Markdown links remain clickable in the PDF and are rendered without underlines
 for print readability. Use `--black-text` when the entire document, including

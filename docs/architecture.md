@@ -192,9 +192,12 @@ absolute checkout path and can be run directly by anyone.
   A page callback paints the watermark first, then the header and footer,
   before document flowables. Header/footer geometry reserves space in the
   text frame. A shaded callout flowable is prepended exactly once. The numbered
-  canvas keeps its existing two-pass behavior and moves numbers right only
-  when a custom footer is present. ReportLab invariant mode is opt-in through
-  `--deterministic`; no default decoration or typography changes occur.
+  canvas keeps its two-pass behavior and moves numbers right when a title or
+  custom footer is present. The first nonempty parsed H1 supplies the default
+  title (plain text), falling back to the input filename stem. `draw_title_footer`
+  truncates it to leave room for numbers, and `--no-title-footer` disables it.
+  A custom footer sits below the title; bottom margins reserve space for both.
+  ReportLab invariant mode is opt-in through `--deterministic`.
 - **Output** (`resolve_output_path`, `versioned_path`, `_prompt_overwrite`,
   `convert_markdown_to_pdf`, `main`): resolve a file or directory output path
   (non-interactive mode writes a `-vN` variant

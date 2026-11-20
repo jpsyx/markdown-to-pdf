@@ -12,7 +12,7 @@ The visual system:
 - Body text: #000000, 10.5 pt, 16.5 pt leading
 - Left/right margins: 62.2 pt
 - Top margin: 56.3 pt
-- No page numbers, headers, or footers
+- Document title in the bottom-left footer; page numbers on longer documents
 - Emoji glyphs render through a monochrome Noto Emoji TTF (cached under
   ~/.cache/markdown-to-pdf/), downloaded on first use; Apple Symbols is a
   partial fallback if the download fails.
@@ -33,7 +33,7 @@ from __future__ import annotations
 # Tool version (semver). Single source of truth. Bump on every commit that is
 # pushed to main, per AGENTS.md: patch for fixes, minor for features, major for
 # breaking CLI changes. Surfaced via `--version` / `-v`.
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 
 import argparse
 import hashlib
@@ -3377,6 +3377,26 @@ def draw_page_footer(canvas: Canvas, page: int, total: int) -> None:
     canvas.restoreState()
 
 
+def draw_title_footer(canvas: Canvas, title: str, y: float) -> None:
+    """Draw a single-line title, shortening it to leave room for page numbers."""
+    width = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - 45
+    size = FOOTER_FONT_SIZE
+    if pdfmetrics.stringWidth(title, BODY_FONT, size) > width:
+        low, high = 0, len(title)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if pdfmetrics.stringWidth(title[:middle] + "...", BODY_FONT, size) <= width:
+                low = middle
+            else:
+                high = middle - 1
+        title = title[:low].rstrip() + "..."
+    canvas.saveState()
+    canvas.setFont(BODY_FONT, size)
+    canvas.setFillColor(FOOTER_COLOR)
+    canvas.drawString(LEFT_MARGIN, y, title)
+    canvas.restoreState()
+
+
 class _SafeDecorationHTML(HTMLParser):
     """Translate a small text-only subset, never loading external resources."""
 
@@ -3565,6 +3585,7 @@ class NumberedCanvas(Canvas):
 
     def __init__(self, *args, **kwargs):
         self._decoration_footer = kwargs.pop("decoration_footer", None)
+        self._title_footer = kwargs.pop("title_footer", None)
         super().__init__(*args, **kwargs)
         self._saved_pages: list[dict] = []
 
@@ -3577,13 +3598,17 @@ class NumberedCanvas(Canvas):
         total = len(self._saved_pages)
         for number, state in enumerate(self._saved_pages, start=1):
             self.__dict__.update(state)
-            if self._decoration_footer:
+            if self._title_footer:
+                title, y = self._title_footer
+                draw_title_footer(self, title, y)
+            if self._decoration_footer or self._title_footer:
                 text = page_number_text(number, total)
                 if text:
                     self.saveState()
                     self.setFont(HEADING_FONT, FOOTER_FONT_SIZE)
                     self.setFillColor(FOOTER_COLOR)
-                    self.drawRightString(PAGE_WIDTH - RIGHT_MARGIN - FRAME_PADDING, self._decoration_footer[2], text)
+                    self.drawRightString(PAGE_WIDTH - RIGHT_MARGIN - FRAME_PADDING,
+                        self._decoration_footer[2] if self._decoration_footer else self._title_footer[1], text)
                     self.restoreState()
             else:
                 draw_page_footer(self, number, total)
@@ -3610,6 +3635,7 @@ def convert_markdown_to_pdf(
     watermark_y: float | None = None,
     watermark_width: float | None = None,
     watermark_opacity: float | None = None,
+    title_footer: bool = True,
     footer: str | None = None,
     footer_x: float | None = None,
     footer_y: float | None = None,
@@ -3667,6 +3693,9 @@ def convert_markdown_to_pdf(
             margins[3] = max(margins[3], y + height + 10)
         elif any(v is not None for v in (footer_x, footer_y, footer_width, footer_opacity)):
             raise ValueError("footer controls require --footer")
+        title_y = FOOTER_BASELINE if footer_spec is None else footer_spec[2] + footer_spec[4] + 6
+        if title_footer:
+            margins[3] = max(margins[3], title_y + FOOTER_FONT_SIZE + FRAME_PADDING)
         callout_markup = decoration_markup(copyright_callout) if copyright_callout is not None else None
         if header_image:
             margins[2] = max(margins[2], PAGE_HEIGHT - header_image[2] + 10)
@@ -3678,6 +3707,10 @@ def convert_markdown_to_pdf(
             markdown = normalize_text(markdown_path.read_text(encoding="utf-8"))
             story = parse_markdown(markdown, table_borders=table_borders, compact_tables=compact_tables,
                 font_shrink=font_shrink, agenda_tables=agenda_tables, black_text=black_text)
+            title = next((item.getPlainText() for item in story
+                if isinstance(item, Paragraph) and item.style.name == "MDChapterTitle"
+                and item.getPlainText().strip()), markdown_path.stem)
+            title = " ".join(title.split())
             story = group_diagram_figures(story, make_styles(font_shrink=font_shrink))
             if callout_markup is not None:
                 callout = Table([[Paragraph(callout_markup, ParagraphStyle("MDRightsCallout",
@@ -3698,7 +3731,8 @@ def convert_markdown_to_pdf(
                 leftMargin=LEFT_MARGIN, rightMargin=RIGHT_MARGIN, topMargin=TOP_MARGIN, bottomMargin=BOTTOM_MARGIN,
                 title=output_path.stem, author="markdown-to-pdf", invariant=deterministic)
             callback = partial(_draw_decorations, header=header_image, watermark=watermark_image, footer=footer_spec)
-            canvasmaker = partial(NumberedCanvas, decoration_footer=footer_spec) if footer_spec else NumberedCanvas
+            canvasmaker = partial(NumberedCanvas, decoration_footer=footer_spec,
+                title_footer=(title, title_y) if title_footer else None)
             doc.build(story, onFirstPage=callback, onLaterPages=callback, canvasmaker=canvasmaker)
     return output_path
 
@@ -3787,6 +3821,8 @@ def main() -> None:
         action="store_true",
         help="Agenda mode. Bundles --no-table-borders + --compact-tables, zeroes table cell left and vertical padding, and sets table type 1.5pt smaller — the styling the /todo agenda PDF requires. Use this for any agenda regeneration so the styling can't be forgotten by individual callers.",
     )
+    parser.add_argument("--no-title-footer", dest="title_footer", action="store_false",
+        help="Omit the bottom-left document title (default: first H1 heading, or input filename, on every page). Custom --footer text and page numbers remain enabled.")
     for element in ("header", "watermark", "footer"):
         parser.add_argument(f"--{element}", type=str if element == "footer" else Path,
             help="Text repeated on every page (9pt default)." if element == "footer" else f"Local raster image repeated as a {element}; aspect ratio is preserved.")
@@ -3826,6 +3862,7 @@ def main() -> None:
             agenda_tables=agenda_tables,
             black_text=args.black_text,
             **{key: value for key, value in vars(args).items() if key.startswith(("header", "watermark", "footer", "margin_", "font_")) and key != "font_shrink"},
+            title_footer=args.title_footer,
             copyright_callout=args.copyright_callout,
             deterministic=args.deterministic,
             density=args.density,

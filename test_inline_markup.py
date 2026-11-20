@@ -2073,7 +2073,7 @@ class PageNumbers(unittest.TestCase):
 
             with unittest.mock.patch.object(main, "draw_page_footer", record):
                 output_path = main.convert_markdown_to_pdf(
-                    markdown_path, root / "long.pdf"
+                    markdown_path, root / "long.pdf", title_footer=False
                 )
 
             self.assertTrue(output_path.is_file())
@@ -2592,6 +2592,55 @@ class PDFDecorations(unittest.TestCase):
             if b"BT" in content and b" Tm" in content:
                 streams.append(content)
         return streams
+
+    def test_title_footer_repeats_the_first_h1_on_every_page(self):
+        self.source.write_text("# **DOCUMENTTITLE**\n\n" + self.source.read_text())
+        result, pdf = self.cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pages = self.streams(pdf)
+        self.assertEqual(len(pages), 2)
+        self.assertEqual([page.count(b"DOCUMENTTITLE") for page in pages], [2, 1])
+        for page in pages:
+            self.assertRegex(page, rb"1 0 0 1 56\.2 24 Tm [^\n]*\(DOCUMENTTITLE\)")
+
+    def test_title_footer_falls_back_to_input_filename_not_output(self):
+        result, pdf = self.cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(b"(guide)" in page for page in self.streams(pdf)))
+
+    def test_title_footer_can_be_disabled_without_disabling_page_numbers(self):
+        result, pdf = self.cli("--no-title-footer")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for number, page in enumerate(self.streams(pdf), 1):
+            self.assertNotIn(b"(guide)", page)
+            self.assertIn(f"({number})".encode(), page)
+
+    def test_single_page_still_has_a_title_footer(self):
+        self.source.write_text("# SINGLETITLE\n\nBody.\n")
+        result, pdf = self.cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pages = self.streams(pdf)
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0].count(b"SINGLETITLE"), 2)
+        self.assertNotIn(b"(1) Tj", pages[0])
+
+    def test_custom_footer_and_title_are_both_preserved(self):
+        result, pdf = self.cli("--footer", "RIGHTSFOOTER")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for page in self.streams(pdf):
+            self.assertIn(b"(guide)", page)
+            self.assertIn(b"RIGHTSFOOTER", page)
+            self.assertRegex(page, rb"1 0 0 1 56\.2 37 Tm [^\n]*\(guide\)")
+
+    def test_title_ignores_h1_inside_code_and_fits_long_titles(self):
+        self.source.write_text("```\n# NOTTITLE\n```\n\n# " + "LONGTITLE " * 100 + "\n")
+        result, pdf = self.cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        page = self.streams(pdf)[0]
+        footer = page[page.rfind(b"1 0 0 1 56.2 24 Tm"):]
+        self.assertIn(b"LONGTITLE", footer)
+        self.assertNotIn(b"NOTTITLE", footer)
+        self.assertLess(len(footer), 400)
 
     def test_images_footer_and_callout_are_painted_in_the_pdf(self):
         result, pdf = self.cli(
