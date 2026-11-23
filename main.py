@@ -12,7 +12,7 @@ The visual system:
 - Body text: #000000, 10.5 pt, 16.5 pt leading
 - Left/right margins: 62.2 pt
 - Top margin: 56.3 pt
-- Document title in the bottom-left footer; page numbers on longer documents
+- Document title in the bottom-left footer; page numbers as 'page of total' on longer documents
 - Emoji glyphs render through a monochrome Noto Emoji TTF (cached under
   ~/.cache/markdown-to-pdf/), downloaded on first use; Apple Symbols is a
   partial fallback if the download fails.
@@ -42,6 +42,7 @@ import html
 import io
 import os
 import contextlib
+import datetime
 import copy
 import re
 import shutil
@@ -58,7 +59,7 @@ from html.parser import HTMLParser
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.utils import ImageReader
@@ -3357,7 +3358,7 @@ def page_number_text(page: int, total: int) -> str:
     """
     if total < 2:
         return ""
-    return str(page)
+    return f"{page} of {total}"
 
 
 def draw_page_footer(canvas: Canvas, page: int, total: int) -> None:
@@ -3374,6 +3375,200 @@ def draw_page_footer(canvas: Canvas, page: int, total: int) -> None:
     canvas.setFillColor(FOOTER_COLOR)
     canvas.drawCentredString(PAGE_WIDTH / 2.0, FOOTER_BASELINE, text)
     # The footer's font and colour must not leak into the next page's content.
+    canvas.restoreState()
+
+
+# --- Footer templates -------------------------------------------------------
+# A footer is a three-column template. ${left}, ${center} (or ${middle}) and
+# ${right} switch columns; text before the first marker is the left column.
+# Every other ${name} token interpolates a document value (see
+# FOOTER_VARIABLES), and each column then goes through the same inline
+# Markdown / safe-HTML rendering as decoration text, so **bold**, *italic*
+# and `code` all work inside a footer. The older %{name} spelling is accepted
+# as an alias, and $${name} renders a literal ${name}. Unknown or unclosed
+# tokens are rejected, never printed as plaintext.
+DEFAULT_FOOTER_TEMPLATE = "${left}${title}${right}${pageNum} of ${totalPages}"
+
+_FOOTER_COLUMN_TOKENS = {"left": "left", "center": "center", "middle": "center", "right": "right"}
+FOOTER_COLUMNS = ("left", "center", "right")
+_FOOTER_VARIABLE_ALIASES = {
+    "page": "pageNum",
+    "pages": "totalPages",
+    "total": "totalPages",
+    "pageCount": "totalPages",
+    "filename": "fileName",
+    "file": "fileName",
+    "inputFile": "fileName",
+    "output": "outputFile",
+    "outputName": "outputFile",
+}
+FOOTER_VARIABLES = (
+    "pageNum", "totalPages", "title", "author", "date", "year", "month", "day",
+    "fileName", "fileStem", "outputFile", "outputStem", "version",
+)
+_FOOTER_SUPPORTED = ", ".join("${" + n + "}" for n in (*_FOOTER_COLUMN_TOKENS, *FOOTER_VARIABLES))
+
+
+def _scan_footer_template(template: str) -> list[tuple[str, str]]:
+    """Split `template` into ("text" | "column" | "var", value) tokens."""
+    tokens: list[tuple[str, str]] = []
+    text: list[str] = []
+    i = 0
+    while i < len(template):
+        if template.startswith("$${", i):
+            # Sentinel keeps the literal token out of the variable pass in
+            # render_footer_columns; it becomes "${" again afterwards.
+            text.append("\x05{")
+            i += 3
+        elif template.startswith("${", i) or template.startswith("%{", i):
+            end = template.find("}", i + 2)
+            if end == -1:
+                raise ValueError(f"Unclosed footer token at position {i}: expected '}}'")
+            name = template[i + 2:end].strip()
+            if not name:
+                raise ValueError("Empty footer token ${} is not supported")
+            if text:
+                tokens.append(("text", "".join(text)))
+                text = []
+            if name in _FOOTER_COLUMN_TOKENS:
+                tokens.append(("column", _FOOTER_COLUMN_TOKENS[name]))
+            elif name in FOOTER_VARIABLES:
+                tokens.append(("var", name))
+            elif name in _FOOTER_VARIABLE_ALIASES:
+                tokens.append(("var", _FOOTER_VARIABLE_ALIASES[name]))
+            else:
+                raise ValueError(f"Unknown footer token ${{{name}}}; supported tokens: {_FOOTER_SUPPORTED}")
+            i = end + 1
+        else:
+            text.append(template[i])
+            i += 1
+    if text:
+        tokens.append(("text", "".join(text)))
+    return tokens
+
+
+def parse_footer_template(template: str) -> dict[str, str]:
+    """Split a footer template into raw left/center/right column strings.
+
+    Variables stay as canonical ${name} markers in the returned strings;
+    only the column markers are consumed. Raises ValueError for unknown,
+    empty, or unclosed tokens.
+    """
+    columns: dict[str, list[str]] = {name: [] for name in FOOTER_COLUMNS}
+    current = "left"
+    for kind, value in _scan_footer_template(template):
+        if kind == "column":
+            current = value
+        elif kind == "var":
+            columns[current].append("${" + value + "}")
+        else:
+            columns[current].append(value)
+    return {name: "".join(parts) for name, parts in columns.items()}
+
+
+def footer_context(*, title: str, markdown_path: Path, output_path: Path | None = None,
+                   page: int, total: int, author: str = "markdown-to-pdf",
+                   on: datetime.date | None = None) -> dict[str, str]:
+    """Document values available to footer ${...} variables for one page."""
+    day = on or datetime.date.today()
+    return {
+        "pageNum": str(page),
+        "totalPages": str(total),
+        "title": title,
+        "author": author,
+        "date": day.isoformat(),
+        "year": f"{day.year:04d}",
+        "month": f"{day.month:02d}",
+        "day": f"{day.day:02d}",
+        "fileName": Path(markdown_path).name,
+        "fileStem": Path(markdown_path).stem,
+        "outputFile": Path(output_path).name if output_path is not None else "",
+        "outputStem": Path(output_path).stem if output_path is not None else "",
+        "version": __version__,
+    }
+
+
+_FOOTER_VAR_MARKER_RE = re.compile(r"\$\{(" + "|".join(FOOTER_VARIABLES) + r")\}")
+
+
+def render_footer_columns(template: str, context: dict[str, str]) -> dict[str, str]:
+    """Interpolate `template` and render each column to Paragraph markup.
+
+    Tokens are extracted before Markdown runs, so a token can never print
+    as plaintext, and interpolated values are escaped after rendering, so
+    Markdown characters inside a title or filename stay literal while
+    markup the author wrote (for example **${title}**) still applies.
+    """
+    columns = parse_footer_template(template)
+    rendered: dict[str, str] = {}
+    for name, raw in columns.items():
+        values: list[str] = []
+
+        def protect(match: re.Match) -> str:
+            values.append(str(context.get(match.group(1), "")))
+            return f"\x04{len(values) - 1}\x04"
+
+        markup = decoration_markup(_FOOTER_VAR_MARKER_RE.sub(protect, raw)) if raw.strip() else ""
+        for index, value in enumerate(values):
+            markup = markup.replace(f"\x04{index}\x04", escape(value, {'"': "&quot;"}))
+        rendered[name] = markup.replace("\x05{", "${")
+    return rendered
+
+
+def _footer_paragraphs(template: str, context: dict[str, str], width: float, opacity: float):
+    """Build the (paragraph, column x offset, height) rows for one page."""
+    columns = render_footer_columns(template, context)
+    column_width = width / len(FOOTER_COLUMNS)
+    if column_width < MIN_CELL_CONTENT_WIDTH:
+        raise ValueError(
+            f"footer width {width:g} is too narrow: each of the three columns needs at least {MIN_CELL_CONTENT_WIDTH:g} points")
+    alignments = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT}
+    rows = []
+    for index, name in enumerate(FOOTER_COLUMNS):
+        markup = columns[name]
+        if not markup.strip():
+            continue
+        style = ParagraphStyle(
+            f"MDDecorationFooter-{name}", fontName=BODY_FONT, fontSize=9, leading=11,
+            textColor=FOOTER_COLOR, alignment=alignments[name])
+        paragraph = Paragraph(markup, style)
+        _apply_footer_opacity(paragraph, opacity)
+        _, height = paragraph.wrap(column_width, PAGE_HEIGHT)
+        rows.append((paragraph, index * column_width, height))
+    return rows
+
+
+def _apply_footer_opacity(paragraph: Paragraph, opacity: float) -> None:
+    """Carry the footer alpha on the paragraph fragments, as Paragraph
+    restates each fragment's colour while drawing."""
+    for fragment in paragraph.frags:
+        for attribute in ("textColor", "backColor"):
+            color = getattr(fragment, attribute, None)
+            if color is not None:
+                color = copy.copy(color)
+                color.alpha = opacity
+                setattr(fragment, attribute, color)
+
+
+def footer_columns_height(template: str, context: dict[str, str], width: float) -> float:
+    """Height the tallest footer column needs at `width` (0 when empty)."""
+    rows = _footer_paragraphs(template, context, width, 1)
+    return max((height for _, _, height in rows), default=0.0)
+
+
+def draw_footer_columns(canvas: Canvas, template: str, context: dict[str, str], *,
+                        x: float, y: float, width: float, opacity: float) -> None:
+    """Draw one page's templated footer: left, centre, and right columns."""
+    rows = _footer_paragraphs(template, context, width, opacity)
+    if not rows:
+        return
+    column_width = width / len(FOOTER_COLUMNS)
+    canvas.saveState()
+    canvas.setFillAlpha(opacity)
+    canvas.setStrokeAlpha(opacity)
+    for paragraph, offset, height in rows:
+        paragraph.wrap(column_width, height)
+        paragraph.drawOn(canvas, x + offset, y)
     canvas.restoreState()
 
 
@@ -3552,7 +3747,7 @@ def _conversion_layout(*, margins, fonts, density: Density | None = None):
         globals().update(saved)
 
 
-def _draw_decorations(canvas, doc, *, header, watermark, footer):
+def _draw_decorations(canvas, doc, *, header, watermark):
     for image in (watermark, header):
         if image:
             reader, x, y, width, height, opacity = image
@@ -3561,14 +3756,6 @@ def _draw_decorations(canvas, doc, *, header, watermark, footer):
             canvas.setStrokeAlpha(opacity)
             canvas.drawImage(reader, x, y, width, height, mask="auto")
             canvas.restoreState()
-    if footer:
-        paragraph, x, y, width, height, opacity = footer
-        canvas.saveState()
-        canvas.setFillAlpha(opacity)
-        canvas.setStrokeAlpha(opacity)
-        paragraph.wrap(width, height)
-        paragraph.drawOn(canvas, x, y)
-        canvas.restoreState()
 
 
 class NumberedCanvas(Canvas):
@@ -3584,8 +3771,10 @@ class NumberedCanvas(Canvas):
     """
 
     def __init__(self, *args, **kwargs):
-        self._decoration_footer = kwargs.pop("decoration_footer", None)
         self._title_footer = kwargs.pop("title_footer", None)
+        self._footer_template = kwargs.pop("footer_template", None)
+        self._footer_context = kwargs.pop("footer_context", None)
+        self._footer_geometry = kwargs.pop("footer_geometry", None)
         super().__init__(*args, **kwargs)
         self._saved_pages: list[dict] = []
 
@@ -3598,19 +3787,25 @@ class NumberedCanvas(Canvas):
         total = len(self._saved_pages)
         for number, state in enumerate(self._saved_pages, start=1):
             self.__dict__.update(state)
-            if self._title_footer:
+            if self._footer_template is not None:
+                context = dict(self._footer_context or {})
+                context.update({"pageNum": str(number), "totalPages": str(total)})
+                x, y, width, opacity = self._footer_geometry
+                draw_footer_columns(self, self._footer_template, context,
+                                    x=x, y=y, width=width, opacity=opacity)
+            elif self._title_footer:
                 title, y = self._title_footer
                 draw_title_footer(self, title, y)
-            if self._decoration_footer or self._title_footer:
+            if self._footer_template is None and self._title_footer:
                 text = page_number_text(number, total)
                 if text:
                     self.saveState()
                     self.setFont(HEADING_FONT, FOOTER_FONT_SIZE)
                     self.setFillColor(FOOTER_COLOR)
                     self.drawRightString(PAGE_WIDTH - RIGHT_MARGIN - FRAME_PADDING,
-                        self._decoration_footer[2] if self._decoration_footer else self._title_footer[1], text)
+                        self._title_footer[1], text)
                     self.restoreState()
-            else:
+            elif self._footer_template is None and not self._title_footer:
                 draw_page_footer(self, number, total)
             super().showPage()
         super().save()
@@ -3669,33 +3864,30 @@ def convert_markdown_to_pdf(
     with _conversion_layout(margins=margins, fonts=fonts, density=layout):
         header_image = _decoration_image(header, header_x, header_y, header_width, header_opacity, "header")
         watermark_image = _decoration_image(watermark, watermark_x, watermark_y, watermark_width, watermark_opacity, "watermark")
-        footer_spec = None
+        # A supplied --footer is a three-column template (see
+        # DEFAULT_FOOTER_TEMPLATE) and replaces the whole default footer,
+        # so it is drawn in NumberedCanvas.save() where the page total is
+        # known, not as a fixed paragraph in the page callback. Validate it
+        # and reserve its space now, before any output is chosen.
+        footer_geometry = None
         if footer is not None:
             x = _point(footer_x, LEFT_MARGIN, "footer x")
             y = _point(footer_y, 20, "footer y")
             width = _point(footer_width, PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN - 45, "footer width", positive=True)
             opacity = _opacity(footer_opacity, "footer opacity")
-            style = ParagraphStyle("MDDecorationFooter", fontName=BODY_FONT, fontSize=9, leading=11, textColor=FOOTER_COLOR)
-            text = Paragraph(decoration_markup(footer), style)
-            # Paragraph sets each fragment's color while drawing, so carry the
-            # requested alpha on its colors as well as on the canvas state.
-            for fragment in text.frags:
-                for attribute in ("textColor", "backColor"):
-                    color = getattr(fragment, attribute, None)
-                    if color is not None:
-                        color = copy.copy(color)
-                        color.alpha = opacity
-                        setattr(fragment, attribute, color)
-            _, height = text.wrap(width, PAGE_HEIGHT)
+            # Measure with values at least as wide as any real page can
+            # produce (a long title, 5-digit counts), so the reserved bottom
+            # margin always covers the drawn footer.
+            sample = footer_context(title="W" * 120, markdown_path=markdown_path, page=99999, total=99999)
+            height = footer_columns_height(footer, sample, width)
             if x + width > PAGE_WIDTH or y + height > PAGE_HEIGHT:
                 raise ValueError("footer must fit inside the page")
-            footer_spec = text, x, y, width, height, opacity
+            footer_geometry = (x, y, width, opacity)
             margins[3] = max(margins[3], y + height + 10)
         elif any(v is not None for v in (footer_x, footer_y, footer_width, footer_opacity)):
             raise ValueError("footer controls require --footer")
-        title_y = FOOTER_BASELINE if footer_spec is None else footer_spec[2] + footer_spec[4] + 6
-        if title_footer:
-            margins[3] = max(margins[3], title_y + FOOTER_FONT_SIZE + FRAME_PADDING)
+        if title_footer and footer is None:
+            margins[3] = max(margins[3], FOOTER_BASELINE + FOOTER_FONT_SIZE + FRAME_PADDING)
         callout_markup = decoration_markup(copyright_callout) if copyright_callout is not None else None
         if header_image:
             margins[2] = max(margins[2], PAGE_HEIGHT - header_image[2] + 10)
@@ -3730,9 +3922,16 @@ def convert_markdown_to_pdf(
             doc = SimpleDocTemplate(str(output_path), pagesize=letter,
                 leftMargin=LEFT_MARGIN, rightMargin=RIGHT_MARGIN, topMargin=TOP_MARGIN, bottomMargin=BOTTOM_MARGIN,
                 title=output_path.stem, author="markdown-to-pdf", invariant=deterministic)
-            callback = partial(_draw_decorations, header=header_image, watermark=watermark_image, footer=footer_spec)
-            canvasmaker = partial(NumberedCanvas, decoration_footer=footer_spec,
-                title_footer=(title, title_y) if title_footer else None)
+            callback = partial(_draw_decorations, header=header_image, watermark=watermark_image)
+            if footer is not None:
+                context = footer_context(
+                    title=title if title_footer else "", markdown_path=markdown_path,
+                    output_path=output_path, page=1, total=1)
+                canvasmaker = partial(NumberedCanvas, footer_template=footer,
+                    footer_context=context, footer_geometry=footer_geometry)
+            else:
+                canvasmaker = partial(NumberedCanvas,
+                    title_footer=(title, FOOTER_BASELINE) if title_footer else None)
             doc.build(story, onFirstPage=callback, onLaterPages=callback, canvasmaker=canvasmaker)
     return output_path
 
@@ -3746,7 +3945,8 @@ def main() -> None:
         description="Convert a markdown file to a styled PDF.",
         epilog="Examples: markdown-to-pdf guide.md --out guide.pdf; "
         "markdown-to-pdf report.md --compact; "
-        "markdown-to-pdf guide.md --header logo.png --footer 'Confidential' "
+        "markdown-to-pdf guide.md --header logo.png --footer '${left}Confidential "
+        "${right}${pageNum} of ${totalPages}' "
         "--copyright-callout '**All rights reserved.**' --deterministic. "
         "Coordinates and margins use PDF points from the bottom-left. "
         "Decoration text accepts inline Markdown or safe HTML: b/strong, i/em, u, br, p, "
@@ -3822,15 +4022,35 @@ def main() -> None:
         help="Agenda mode. Bundles --no-table-borders + --compact-tables, zeroes table cell left and vertical padding, and sets table type 1.5pt smaller — the styling the /todo agenda PDF requires. Use this for any agenda regeneration so the styling can't be forgotten by individual callers.",
     )
     parser.add_argument("--no-title-footer", dest="title_footer", action="store_false",
-        help="Omit the bottom-left document title (default: first H1 heading, or input filename, on every page). Custom --footer text and page numbers remain enabled.")
-    for element in ("header", "watermark", "footer"):
-        parser.add_argument(f"--{element}", type=str if element == "footer" else Path,
-            help="Text repeated on every page (9pt default)." if element == "footer" else f"Local raster image repeated as a {element}; aspect ratio is preserved.")
+        help="Omit the document title from the footer: it removes ${title} from a "
+             "--footer template and drops the default bottom-left title. Page numbers remain enabled.")
+    parser.add_argument("--footer", type=str, default=None, metavar="TEMPLATE",
+        help="Footer template repeated on every page, replacing the whole footer "
+             "(9pt type, 11pt leading). Three columns: ${left}, ${center} (or ${middle}) "
+             "and ${right} switch columns, and text before the first marker is the left "
+             "column. Variables: ${pageNum}, ${totalPages}, ${title}, ${author}, ${date} "
+             "(YYYY-MM-DD), ${year}, ${month}, ${day}, ${fileName}, ${fileStem}, "
+             "${outputFile}, ${outputStem} and ${version}; ${page}, ${pages}, ${total} "
+             "and ${pageCount} are aliases. Column text accepts inline Markdown and the "
+             "safe HTML subset, so '**Hello**' prints bold, and $${name} prints a literal "
+             "token. Unknown tokens are rejected. (default: the default footer, "
+             "\"" + DEFAULT_FOOTER_TEMPLATE + "\", title on the left and "
+             "'pageNum of totalPages' on the right; one-page documents stay unnumbered)")
+    for control, description in (
+        ("x", "Footer lower-left x coordinate in PDF points (default: left margin)."),
+        ("y", "Footer lower-left y coordinate in PDF points (default: 20)."),
+        ("width", "Footer width in PDF points (default: content width less 45), split into three columns."),
+        ("opacity", "Footer opacity from 0 (invisible) to 1 (opaque); default 1."),
+    ):
+        parser.add_argument(f"--footer-{control}", type=float, help=description)
+    for element in ("header", "watermark"):
+        parser.add_argument(f"--{element}", type=Path,
+            help=f"Local raster image repeated as a {element}; aspect ratio is preserved.")
         for control in ("x", "y", "width", "opacity"):
             descriptions = {
                 "x": "Lower-left x coordinate in PDF points (default: left margin; watermark: centered).",
-                "y": "Lower-left y coordinate in PDF points (default: header 24pt below page top; watermark centered; footer 20pt).",
-                "width": "Width in PDF points (default: header 120; watermark 300; footer content width less 45).",
+                "y": "Lower-left y coordinate in PDF points (default: header 24pt below page top; watermark: centered).",
+                "width": "Width in PDF points (default: header 120; watermark 300).",
                 "opacity": "Opacity from 0 (invisible) to 1 (opaque); default 1.",
             }
             parser.add_argument(f"--{element}-{control}", type=float, help=descriptions[control])

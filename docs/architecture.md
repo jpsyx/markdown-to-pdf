@@ -172,7 +172,7 @@ absolute checkout path and can be run directly by anyone.
 - **Parser** (`parse_markdown`): the line-oriented state machine that walks the
   Markdown and dispatches to the block builders, flushing buffers at boundaries.
 - **Page numbers** (`page_number_text`, `draw_page_footer`, `NumberedCanvas`):
-  each page is stamped with its bare number in the bottom margin, under the
+  each page is stamped with its `page of total` count in the bottom margin, under the
   frame, so numbering costs no content height and changes no pagination. A
   one-page document is left unnumbered, and that is what needs the second pass:
   whether there is more than one page is only known once the whole story is
@@ -189,14 +189,22 @@ absolute checkout path and can be run directly by anyone.
   selected margins without leaking them into another conversion. Font names
   derive from file content; every custom family registers all four styles,
   falling back within that family rather than mixing unrelated typefaces.
-  A page callback paints the watermark first, then the header and footer,
-  before document flowables. Header/footer geometry reserves space in the
+  A page callback paints the watermark first, then the header,
+  before document flowables; footer text is drawn by the numbered canvas. Header/footer geometry reserves space in the
   text frame. A shaded callout flowable is prepended exactly once. The numbered
-  canvas keeps its two-pass behavior and moves numbers right when a title or
-  custom footer is present. The first nonempty parsed H1 supplies the default
-  title (plain text), falling back to the input filename stem. `draw_title_footer`
+  canvas keeps its two-pass behavior and moves numbers right when a title is
+  present. The first nonempty parsed H1 supplies the default title (plain
+  text), falling back to the input filename stem. `draw_title_footer`
   truncates it to leave room for numbers, and `--no-title-footer` disables it.
-  A custom footer sits below the title; bottom margins reserve space for both.
+  A supplied `--footer` is instead a three-column template
+  (`parse_footer_template`, `footer_context`, `render_footer_columns`,
+  `draw_footer_columns`): `${left}`, `${center}`/`${middle}` and `${right}`
+  switch columns, document variables such as `${pageNum}`, `${totalPages}`,
+  `${title}`, `${author}`, `${date}`, `${fileName}` and `${version}` are
+  extracted before each column's Markdown is rendered, and the columns are
+  drawn from `NumberedCanvas.save()` once the total is known. It replaces
+  the whole default footer (`DEFAULT_FOOTER_TEMPLATE`); bottom margins
+  reserve space for its tallest column.
   ReportLab invariant mode is opt-in through `--deterministic`.
 - **Output** (`resolve_output_path`, `versioned_path`, `_prompt_overwrite`,
   `convert_markdown_to_pdf`, `main`): resolve a file or directory output path

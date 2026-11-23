@@ -2016,7 +2016,7 @@ class _RecordingCanvas:
 
 class PageNumbers(unittest.TestCase):
     def test_the_footer_is_the_bare_page_number(self):
-        self.assertEqual(main.page_number_text(3, 12), "3")
+        self.assertEqual(main.page_number_text(3, 12), "3 of 12")
 
     def test_a_single_page_document_is_not_numbered(self):
         # A "1" alone on a one-page document tells the reader nothing: there is
@@ -2048,7 +2048,7 @@ class PageNumbers(unittest.TestCase):
 
         self.assertEqual(
             canvas.strings,
-            [(main.PAGE_WIDTH / 2.0, main.FOOTER_BASELINE, "2")],
+            [(main.PAGE_WIDTH / 2.0, main.FOOTER_BASELINE, "2 of 5")],
         )
         self.assertEqual(canvas.font, (main.HEADING_FONT, main.FOOTER_FONT_SIZE))
         # Drawing must not leak the footer's font and colour into the next
@@ -2080,6 +2080,71 @@ class PageNumbers(unittest.TestCase):
             self.assertGreater(len(drawn), 1)
             total = len(drawn)
             self.assertEqual(drawn, [(n + 1, total) for n in range(total)])
+
+
+class FooterTemplate(unittest.TestCase):
+    CTX = {"pageNum": "2", "totalPages": "5", "title": "A *Star* Doc", "author": "Ada",
+           "date": "2026-11-23", "year": "2026", "month": "11", "day": "23",
+           "fileName": "guide.md", "fileStem": "guide", "outputFile": "guide.pdf",
+           "outputStem": "guide", "version": "9.9.9"}
+
+    def test_default_template_is_title_left_and_page_count_right(self):
+        self.assertEqual(main.DEFAULT_FOOTER_TEMPLATE,
+                         "${left}${title}${right}${pageNum} of ${totalPages}")
+        columns = main.parse_footer_template(main.DEFAULT_FOOTER_TEMPLATE)
+        self.assertEqual(columns, {"left": "${title}", "center": "", "right": "${pageNum} of ${totalPages}"})
+
+    def test_columns_split_and_text_before_first_marker_is_left(self):
+        columns = main.parse_footer_template("Hello ${center}Mid ${right}Right")
+        self.assertEqual(columns, {"left": "Hello ", "center": "Mid ", "right": "Right"})
+
+    def test_middle_is_an_alias_for_center_and_percent_syntax_is_accepted(self):
+        columns = main.parse_footer_template("%{left}L %{middle}M %{right}${pageNum}")
+        self.assertEqual(columns["center"], "M ")
+        self.assertEqual(columns["right"], "${pageNum}")
+
+    def test_markdown_is_parsed_after_tokens_are_extracted(self):
+        columns = main.render_footer_columns("${left}**Hello**", self.CTX)
+        self.assertEqual(columns["left"], "<b>Hello</b>")
+
+    def test_variables_substitute_and_title_stays_literal(self):
+        columns = main.render_footer_columns(
+            "${left}${title}${center}${date}${right}Page ${pageNum} of ${totalPages} (${fileName})", self.CTX)
+        self.assertEqual(columns["left"], "A *Star* Doc")
+        self.assertEqual(columns["center"], "2026-11-23")
+        self.assertEqual(columns["right"], "Page 2 of 5 (guide.md)")
+
+    def test_variable_aliases_resolve(self):
+        columns = main.render_footer_columns("${left}${page}/${pages} ${author} ${version}", self.CTX)
+        self.assertEqual(columns["left"], "2/5 Ada 9.9.9")
+
+    def test_escaped_token_is_literal(self):
+        columns = main.render_footer_columns("${left}$${title}", self.CTX)
+        self.assertEqual(columns["left"], "${title}")
+
+    def test_unknown_and_unclosed_tokens_raise(self):
+        for bad in ("${bogus}", "${pageNum", "${}", "Text %{nope}"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                main.parse_footer_template(bad)
+
+    def test_output_and_date_part_variables_render(self):
+        columns = main.render_footer_columns(
+            "${left}${outputFile}|${outputStem}|${year}-${month}-${day}|${fileStem}", self.CTX)
+        self.assertEqual(columns["left"], "guide.pdf|guide|2026-11-23|guide")
+
+    def test_columns_too_narrow_for_a_glyph_are_rejected(self):
+        for width in (2, 6, 17):
+            with self.subTest(width=width), self.assertRaises(ValueError):
+                main.footer_columns_height("${left}Hello", self.CTX, width)
+
+    def test_footer_context_builds_document_values(self):
+        import datetime
+        ctx = main.footer_context(title="T", markdown_path=Path("docs/guide.md"),
+                                  output_path=Path("out/guide.pdf"), page=3, total=7,
+                                  on=datetime.date(2026, 1, 2))
+        self.assertEqual((ctx["pageNum"], ctx["totalPages"], ctx["fileName"], ctx["fileStem"],
+                          ctx["outputFile"], ctx["outputStem"], ctx["date"]),
+                         ("3", "7", "guide.md", "guide", "guide.pdf", "guide", "2026-01-02"))
 
 
 class AgendaTables(unittest.TestCase):
@@ -2613,7 +2678,7 @@ class PDFDecorations(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for number, page in enumerate(self.streams(pdf), 1):
             self.assertNotIn(b"(guide)", page)
-            self.assertIn(f"({number})".encode(), page)
+            self.assertIn(f"({number} of 2)".encode(), page)
 
     def test_single_page_still_has_a_title_footer(self):
         self.source.write_text("# SINGLETITLE\n\nBody.\n")
@@ -2622,15 +2687,16 @@ class PDFDecorations(unittest.TestCase):
         pages = self.streams(pdf)
         self.assertEqual(len(pages), 1)
         self.assertEqual(pages[0].count(b"SINGLETITLE"), 2)
+        self.assertNotIn(b"(1 of 1)", pages[0])
         self.assertNotIn(b"(1) Tj", pages[0])
 
-    def test_custom_footer_and_title_are_both_preserved(self):
+    def test_custom_footer_replaces_the_default_footer(self):
         result, pdf = self.cli("--footer", "RIGHTSFOOTER")
         self.assertEqual(result.returncode, 0, result.stderr)
         for page in self.streams(pdf):
-            self.assertIn(b"(guide)", page)
+            self.assertNotIn(b"(guide)", page)
+            self.assertNotIn(b"of 2", page)
             self.assertIn(b"RIGHTSFOOTER", page)
-            self.assertRegex(page, rb"1 0 0 1 56\.2 37 Tm [^\n]*\(guide\)")
 
     def test_title_ignores_h1_inside_code_and_fits_long_titles(self):
         self.source.write_text("```\n# NOTTITLE\n```\n\n# " + "LONGTITLE " * 100 + "\n")
@@ -2667,10 +2733,45 @@ class PDFDecorations(unittest.TestCase):
         self.assertIn(b"NOTICEFIRST", streams[0])
         self.assertNotIn(b"NOTICEFIRST", streams[1])
         self.assertLess(streams[0].index(b"NOTICEFIRST"), streams[0].index(b"BODYFIRST"))
-        self.assertRegex(streams[0], rb"5[0-9.]+ 20 Tm /F[^ ]+ 8.5 Tf 10.2 TL \(1\)")
+        self.assertNotIn(b"of 2", streams[0])  # A custom --footer replaces the whole footer.
         self.assertIn(b"/ca .55", pdf.read_bytes())
         self.assertIn(b"/ca .25", pdf.read_bytes())
         self.assertIn(b"/ca .8", pdf.read_bytes())
+
+    def test_default_footer_pairs_title_with_page_count(self):
+        self.source.write_text("# Default Doc\n\n" + self.source.read_text())
+        result, pdf = self.cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pages = self.streams(pdf)
+        self.assertEqual(len(pages), 2)
+        for number, page in enumerate(pages, 1):
+            self.assertIn(b"Default Doc", page)
+            self.assertIn(f"({number} of 2)".encode(), page)
+
+    def test_templated_footer_reserves_space_for_a_long_title(self):
+        self.source.write_text("# " + "WindingTitle " * 20 + "\n\nRESERVEDBODY\n")
+        result, pdf = self.cli("--footer", "${left}${title}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        page = self.streams(pdf)[0]
+        origins = re.findall(rb"1 0 0 1 ([0-9.]+) ([0-9.]+) cm", page)
+        # origins: page setup, the H1, the body paragraph, then the footer.
+        self.assertEqual(origins[2][1].decode(), "522.7")
+        self.assertEqual(len(origins), 4)
+
+    def test_templated_footer_interpolates_pages_title_and_markdown(self):
+        self.source.write_text("# My Doc\n\n" + self.source.read_text())
+        result, pdf = self.cli(
+            "--footer", "${left}**LEFTBOLD** ${title}${center}Middle ${pageNum}${right}${pageNum} of ${totalPages}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pages = self.streams(pdf)
+        self.assertEqual(len(pages), 2)
+        for number, page in enumerate(pages, 1):
+            self.assertIn(b"LEFTBOLD", page)
+            self.assertIn(b"My Doc", page)
+            self.assertIn(b"Middle", page)
+            self.assertIn(f"({number} of 2)".encode(), page)
+            self.assertNotIn(b"**", page)
+            self.assertNotIn(b"${", page)
 
     def test_decorated_output_is_deterministic_and_reserves_image_space(self):
         flags = ["--header", self.header, "--header-y", "700", "--header-width", "120",
@@ -2721,6 +2822,8 @@ class PDFDecorations(unittest.TestCase):
             ["--footer", "text", "--footer-width", "1000"],
             ["--copyright-callout", '<img src="https://example.com/remote.png"/>'],
             ["--footer", '<font name="Helvetica">bad</font>'],
+            ["--footer", "${bogus}"], ["--footer", "${pageNum"], ["--footer", "${}"],
+            ["--footer", "text", "--footer-width", "2"],
             ["--copyright-callout", "<script>alert(1)</script>"],
             ["--font-regular", bad_image], ["--font-bold", bad_image],
             ["--margin-left", "600"], ["--margin-top", "nan"],

@@ -33,7 +33,7 @@ changing the source Markdown:
 markdown-to-pdf guide.md --out guide.pdf \
   --header logo.png --header-width 120 --header-opacity 0.6 \
   --watermark watermark.png --watermark-width 300 --watermark-opacity 0.15 \
-  --footer '<font color="#94A4B8">Copyright 2026. All rights reserved.</font>' \
+  --footer '${left}<font color="#94A4B8">Copyright 2026.</font>${right}${pageNum} of ${totalPages}' \
   --copyright-callout '**All rights reserved.** Shared for review only.' \
   --deterministic
 
@@ -53,8 +53,8 @@ lower-left text box, not its baseline.
 | --- | --- |
 | `--header PATH` | Local raster image on every page. Default width 120, x at left margin, top edge 24 points below page top. |
 | `--watermark PATH` | Local raster image beneath each page's content. Default width 300, centered. |
-| `--no-title-footer` | Omit the default bottom-left document title; custom footer text and page numbers remain. |
-| `--footer TEXT` | Text on every page, 9-point type with 11-point leading. Default x at left margin, y 20, width equal to the margin box less 45 points. |
+| `--no-title-footer` | Omit the document title: removes `${title}` from a `--footer` template and drops the default bottom-left title. Page numbers remain. |
+| `--footer TEMPLATE` | Three-column footer template on every page, replacing the whole footer (9-point type, 11-point leading). `${left}`, `${center}` (or `${middle}`), and `${right}` switch columns; text before the first marker is the left column. Variables: `${pageNum}`, `${totalPages}`, `${title}`, `${author}`, `${date}`, `${year}`, `${month}`, `${day}`, `${fileName}`, `${fileStem}`, `${outputFile}`, `${outputStem}`, `${version}` (aliases `${page}`, `${pages}`, `${total}`, `${pageCount}`). Default x at left margin, y 20, width equal to the margin box less 45 points, split into three columns. Default when omitted: `${left}${title}${right}${pageNum} of ${totalPages}`. |
 | `--header-x`, `--header-y`, `--header-width`, `--header-opacity` | Override header placement, size, or opacity. |
 | `--watermark-x`, `--watermark-y`, `--watermark-width`, `--watermark-opacity` | Override watermark placement, size, or opacity. |
 | `--footer-x`, `--footer-y`, `--footer-width`, `--footer-opacity` | Override footer placement, text-box width, or opacity. |
@@ -84,14 +84,25 @@ markdown-to-pdf guide.md --copyright-callout \
   '<p><strong>Reader notice</strong><br/>Shared for review only.</p>'
 ```
 
-The document title repeats in the bottom-left corner on every page, including
-single-page documents. It uses the first nonempty H1 heading, with inline markup
-removed, or the input filename without its extension when there is no H1.
-Long titles are shortened with an ellipsis to leave room for page numbers.
-Use `--no-title-footer` to omit it. Custom `--footer` text is preserved below
-the title, with space reserved automatically. Page numbers remain hidden for
-one page and appear on the right for longer documents; with a custom footer,
-they use that footer's y coordinate. Without either footer, numbers are centered.
+The footer is a three-column template. Without `--footer`, the equivalent of
+`--footer '${left}${title}${right}${pageNum} of ${totalPages}'` is used: the
+document title on the left and the page count on the right. The title uses the
+first nonempty H1 heading, with inline markup removed, or the input filename
+without its extension when there is no H1, and long titles are shortened with
+an ellipsis to leave room for the count. Page numbers stay hidden for one-page
+documents in this default footer, and are centered when there is no title.
+Supplying `--footer` replaces the whole footer: interpolate document values
+with `${pageNum}`, `${totalPages}`, `${title}`, `${author}`, `${date}`,
+`${year}`, `${month}`, `${day}`, `${fileName}`, `${fileStem}`, `${outputFile}`,
+`${outputStem}`, or `${version}`, place text with `${left}`, `${center}`
+(or `${middle}`), and `${right}`, and style each column with the same inline
+Markdown and safe HTML as before, so `--footer '${left}**Hello**'` prints bold.
+Tokens are extracted before Markdown runs, interpolated values stay literal,
+`$${name}` prints a literal token, and unknown or unclosed tokens are rejected
+before any output is created. An explicit template always interpolates, so it
+prints `1 of 1` on a one-page document. Use `--no-title-footer` to empty
+`${title}` and drop the default title. Space below the content is reserved
+automatically for the tallest column.
 `--black-text` still controls document text; an explicitly colored footer or
 callout span retains its chosen color. Custom fonts and margins apply only to
 the current conversion, including when several conversions share a Python
@@ -291,8 +302,10 @@ the page without being enlarged. Remote image URLs are rejected and never
 fetched.
 
 Every page includes the document title at the bottom left by default. Use
-`--no-title-footer` to opt out. Longer documents also have page numbers at the
-bottom right; a document that fits on one page is left unnumbered.
+`--no-title-footer` to opt out. Longer documents also show the page count as
+`page of total` at the bottom right; a document that fits on one page is left
+unnumbered. See `--footer` above for the three-column template and its
+`${...}` variables.
 
 Markdown links remain clickable in the PDF and are rendered without underlines
 for print readability. Use `--black-text` when the entire document, including
